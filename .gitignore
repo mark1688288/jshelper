@@ -3,3 +3,8 @@
 credentials.json
 token.json
 .DS_Store
+/docs-cli
+/docs-cli.exe
+.env.*.tmp
+credentials.json.*.tmp
+token.json.*.tmp
