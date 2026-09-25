@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/mark1688288/jshelper/internal/config"
+	"github.com/mark1688288/jshelper/internal/oauth"
 )
 
 // Help exits 2. This program does not follow the GNU convention of exit 0.
@@ -33,13 +35,14 @@ func main() {
 }
 
 type deps struct {
-	Stdin   io.Reader
-	Stdout  io.Writer
-	Stderr  io.Writer
-	Environ []string
-	Root    string
-	TTY     config.TTY
-	OpenTTY func() (config.TTY, error)
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Stderr    io.Writer
+	Environ   []string
+	Root      string
+	TTY       config.TTY
+	OpenTTY   func() (config.TTY, error)
+	Authorize func(context.Context, *config.Config, oauth.Options) error
 }
 
 func realDeps() deps {
@@ -61,7 +64,7 @@ func run(args []string, d deps) int {
 	case "create":
 		return runCreate(args[1:], d)
 	case "auth":
-		return runBare("auth", args[1:], d)
+		return runAuth(args[1:], d)
 	case "setup":
 		return runSetup(args[1:], d)
 	default:
@@ -78,9 +81,65 @@ func runCreate(args []string, d deps) int {
 	return parseOrUnimplemented(fs, args, d)
 }
 
-func runBare(name string, args []string, d deps) int {
-	fs := newFlagSet(name, d.Stderr)
-	return parseOrUnimplemented(fs, args, d)
+func runAuth(args []string, d deps) int {
+	fs := newFlagSet("auth", d.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	root, err := commandRoot(d)
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	mode, err := config.ResolveMode(d.Environ)
+	if err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	envPath := filepath.Join(root, ".env")
+	_, statErr := os.Lstat(envPath)
+	existed := statErr == nil
+	var cfg *config.Config
+	if mode == "production" {
+		tty, closeTTY := openCommandTTY(d)
+		defer closeTTY()
+		cfg, err = config.EnsureProductionEnv(root, d.Environ, tty)
+		if _, afterErr := os.Lstat(envPath); !existed && afterErr == nil {
+			fmt.Fprintln(d.Stderr, "docs-cli: copied .env.example to .env")
+		}
+	} else {
+		cfg, err = config.Load(root, d.Environ)
+	}
+	if err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	fmt.Fprintf(d.Stderr, "docs-cli: mode=%s file=%s\n", cfg.Mode, filepath.Base(cfg.FilePath))
+	if err := config.RequireClient(cfg); err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	if err := config.WriteCredentials(cfg); err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	fmt.Fprintln(d.Stderr, "docs-cli: wrote credentials.json")
+	authorize := d.Authorize
+	if authorize == nil {
+		authorize = func(ctx context.Context, cfg *config.Config, opt oauth.Options) error {
+			_, err := oauth.Authorize(ctx, cfg, opt)
+			return err
+		}
+	}
+	if err := authorize(context.Background(), cfg, oauth.Options{Force: true, Stderr: d.Stderr}); err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	return 0
 }
 
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
@@ -114,25 +173,13 @@ func runSetup(args []string, d deps) int {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
 	}
-	root := d.Root
-	if root == "" {
-		var err error
-		root, err = os.Getwd()
-		if err != nil {
-			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
-			return 1
-		}
+	root, err := commandRoot(d)
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
 	}
-	tty := d.TTY
-	if tty == nil && d.OpenTTY != nil {
-		opened, err := d.OpenTTY()
-		if err == nil {
-			tty = opened
-			if c, ok := tty.(io.Closer); ok {
-				defer c.Close()
-			}
-		}
-	}
+	tty, closeTTY := openCommandTTY(d)
+	defer closeTTY()
 	envPath := filepath.Join(root, ".env")
 	_, statErr := os.Lstat(envPath)
 	existed := statErr == nil
@@ -155,4 +202,29 @@ func runSetup(args []string, d deps) int {
 	}
 	fmt.Fprintln(d.Stderr, "docs-cli: wrote credentials.json")
 	return 0
+}
+
+func commandRoot(d deps) (string, error) {
+	if d.Root != "" {
+		return d.Root, nil
+	}
+	return os.Getwd()
+}
+
+func openCommandTTY(d deps) (config.TTY, func()) {
+	if d.TTY != nil {
+		return d.TTY, func() {}
+	}
+	if d.OpenTTY == nil {
+		return nil, func() {}
+	}
+	opened, err := d.OpenTTY()
+	if err != nil {
+		return nil, func() {}
+	}
+	return opened, func() {
+		if c, ok := opened.(io.Closer); ok {
+			_ = c.Close()
+		}
+	}
 }
