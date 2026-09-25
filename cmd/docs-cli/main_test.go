@@ -91,3 +91,36 @@ func TestRun(t *testing.T) {
 		t.Fatalf("temp dir has files: %s", strings.Join(names, ", "))
 	}
 }
+
+func TestSubcommandsLeaveEnvUntouched(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	original := []byte("APP_ENV=development\nSECRET=keep\n")
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commands := [][]string{
+		{"create"},
+		{"auth"},
+		{"setup"},
+		{"create", "--title", "Demo", "--text", "hello", "--folder", "abc"},
+	}
+	for _, args := range commands {
+		var stdout, stderr bytes.Buffer
+		code := run(args, deps{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
+		if code != 1 || !strings.Contains(stderr.String(), "not implemented") {
+			t.Fatalf("%v: exit %d stderr %q", args, code, stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("%v: stdout %q", args, stdout.String())
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, original) {
+			t.Fatalf("%v: .env changed to %q", args, got)
+		}
+	}
+}

@@ -1,18 +1,19 @@
-
 #!/usr/bin/env bash
 # One-time Google Cloud setup for the Docs CLI.
 #
-# Automated: create the project if missing, enable the Docs API, and write
-# credentials.json once the Desktop client id/secret are in the env file.
+# Automated: create the project if missing, enable the Docs and Drive APIs,
+# and write credentials.json once the Desktop client id/secret are in the env file.
 # Not automated: Google Auth platform has no stable CLI for a Desktop client.
 # Branding, Audience (External / Testing / test user), scope, and Clients
 # stay a one-time Console pass. IAP oauth-clients are a different client type
 # and are intentionally not used here.
 #
+# ROOT is the parent of the script directory, not config/.
 # Env file: APP_ENV=production reads ./.env; anything else reads ./.env.example.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
 MODE=bootstrap
@@ -91,6 +92,7 @@ fi
 require GCP_PROJECT_ID
 require GCP_PROJECT_NAME
 require GOOGLE_DOCS_API
+require GOOGLE_DRIVE_API
 require GOOGLE_OAUTH_APP_NAME
 require GOOGLE_OAUTH_SUPPORT_EMAIL
 require GOOGLE_OAUTH_USER_TYPE
@@ -108,8 +110,6 @@ require GOOGLE_OAUTH_PROMPT
 require GOOGLE_OAUTH_PKCE_METHOD
 require OAUTH_TIMEOUT
 require GOOGLE_CREDENTIALS_PATH
-require GOOGLE_TOKEN_PATH
-require GOOGLE_TOKEN_FILE_MODE
 require DOCS_INSERT_INDEX
 require DOCS_DEFAULT_TITLE
 
@@ -129,8 +129,20 @@ if [[ "$GOOGLE_OAUTH_SCOPE" == *readonly* ]]; then
   echo "GOOGLE_OAUTH_SCOPE cannot be a readonly scope" >&2
   exit 1
 fi
+if [[ "$GOOGLE_OAUTH_SCOPE" != "https://www.googleapis.com/auth/drive" ]]; then
+  echo "GOOGLE_OAUTH_SCOPE must be https://www.googleapis.com/auth/drive" >&2
+  exit 1
+fi
 if [[ -n "$GCP_ORGANIZATION_ID" && -n "$GCP_FOLDER_ID" ]]; then
   echo "set only one of GCP_ORGANIZATION_ID or GCP_FOLDER_ID" >&2
+  exit 1
+fi
+if [[ "$GOOGLE_DOCS_API" != "docs.googleapis.com" ]]; then
+  echo "GOOGLE_DOCS_API must be docs.googleapis.com" >&2
+  exit 1
+fi
+if [[ "$GOOGLE_DRIVE_API" != "drive.googleapis.com" ]]; then
+  echo "GOOGLE_DRIVE_API must be drive.googleapis.com" >&2
   exit 1
 fi
 
@@ -146,7 +158,8 @@ fi
 BRANDING_URL="https://console.cloud.google.com/auth/branding?project=${GCP_PROJECT_ID}"
 AUDIENCE_URL="https://console.cloud.google.com/auth/audience?project=${GCP_PROJECT_ID}"
 CLIENTS_URL="https://console.cloud.google.com/auth/clients?project=${GCP_PROJECT_ID}"
-API_URL="https://console.cloud.google.com/apis/library/docs.googleapis.com?project=${GCP_PROJECT_ID}"
+DOCS_LIBRARY_URL="https://console.cloud.google.com/apis/library/docs.googleapis.com?project=${GCP_PROJECT_ID}"
+DRIVE_LIBRARY_URL="https://console.cloud.google.com/apis/library/drive.googleapis.com?project=${GCP_PROJECT_ID}"
 
 echo "env=$APP_ENV file=$(basename "$ENV_FILE") project=$GCP_PROJECT_ID"
 
@@ -160,6 +173,7 @@ if [[ "$MODE" == "check" ]]; then
     echo "next: clients   $CLIENTS_URL"
   fi
   echo "insert_index=$DOCS_INSERT_INDEX scope=$GOOGLE_OAUTH_SCOPE"
+  echo "apis=docs.googleapis.com,drive.googleapis.com"
   exit 0
 fi
 
@@ -179,7 +193,16 @@ if ! gcloud projects describe "$GCP_PROJECT_ID" >/dev/null 2>&1; then
 fi
 
 gcloud config set project "$GCP_PROJECT_ID" >/dev/null
-gcloud services enable "$GOOGLE_DOCS_API" --project="$GCP_PROJECT_ID"
+if ! gcloud services enable docs.googleapis.com --project="$GCP_PROJECT_ID"; then
+  echo "$DOCS_LIBRARY_URL" >&2
+  echo "$DRIVE_LIBRARY_URL" >&2
+  exit 1
+fi
+if ! gcloud services enable drive.googleapis.com --project="$GCP_PROJECT_ID"; then
+  echo "$DOCS_LIBRARY_URL" >&2
+  echo "$DRIVE_LIBRARY_URL" >&2
+  exit 1
+fi
 
 if [[ -n "$GCP_BILLING_ACCOUNT" ]]; then
   gcloud billing projects link "$GCP_PROJECT_ID" --billing-account="$GCP_BILLING_ACCOUNT"
@@ -194,7 +217,8 @@ if [[ "$has_client" == "0" ]]; then
   echo "3. Clients: create Desktop app named $GOOGLE_OAUTH_CLIENT_NAME"
   echo "   $CLIENTS_URL"
   echo "4. Put the client id and secret into $(basename "$ENV_FILE"), then rerun this script."
-  echo "API page if enable failed: $API_URL"
+  echo "API pages: $DOCS_LIBRARY_URL"
+  echo "           $DRIVE_LIBRARY_URL"
   if [[ "$OPEN_BROWSER" == "1" ]]; then
     if command -v xdg-open >/dev/null 2>&1; then
       xdg-open "$CLIENTS_URL" >/dev/null 2>&1 || true
@@ -236,5 +260,5 @@ os.chmod(path, 0o600)
 PY
 
 echo "wrote $GOOGLE_CREDENTIALS_PATH"
-echo "token cache: $GOOGLE_TOKEN_PATH (created on first CLI login, mode $GOOGLE_TOKEN_FILE_MODE)"
+echo "refresh token: keyring item docs-cli / refresh-token (not a file)"
 echo "blank doc insert index: $DOCS_INSERT_INDEX"
