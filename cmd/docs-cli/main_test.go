@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/mark1688288/jshelper/internal/config"
+	"github.com/mark1688288/jshelper/internal/oauth"
 )
 
 func TestRun(t *testing.T) {
@@ -47,7 +49,7 @@ func TestRun(t *testing.T) {
 		{name: "setup rejects title", args: []string{"setup", "--title", "Demo"}, code: 2, stderr: "usage: docs-cli"},
 		{name: "setup rejects folder", args: []string{"setup", "--folder", "abc"}, code: 2, stderr: "usage: docs-cli"},
 		{name: "create", args: []string{"create"}, code: 1, stderr: "not implemented"},
-		{name: "auth", args: []string{"auth"}, code: 1, stderr: "not implemented"},
+		{name: "auth", args: []string{"auth"}, code: 1, stderr: "missing .env.example"},
 		{name: "setup", args: []string{"setup"}, code: 1, stderr: "docs-cli: setup refused: development reads .env.example and does not copy or prompt"},
 		{
 			name:   "create with flags",
@@ -77,6 +79,9 @@ func TestRun(t *testing.T) {
 			}
 			if tt.code == 2 && !strings.Contains(got, "usage: docs-cli") {
 				t.Fatalf("stderr = %q, want usage", got)
+			}
+			if strings.Contains(got, "listening") {
+				t.Fatalf("stderr = %q, listened", got)
 			}
 			if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
 				t.Fatalf(".env created or stat failed: %v", err)
@@ -115,8 +120,11 @@ func TestSubcommandsLeaveEnvUntouched(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		code := run(args, deps{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
 		want := "not implemented"
-		if args[0] == "setup" {
+		switch args[0] {
+		case "setup":
 			want = "setup refused"
+		case "auth":
+			want = "missing .env.example"
 		}
 		if code != 1 || !strings.Contains(stderr.String(), want) {
 			t.Fatalf("%v: exit %d stderr %q", args, code, stderr.String())
@@ -143,7 +151,6 @@ func TestCreateAndAuthDoNotCopyInProduction(t *testing.T) {
 	}
 	commands := [][]string{
 		{"create"},
-		{"auth"},
 		{"create", "--title", "Demo", "--text", "hello", "--folder", "abc"},
 	}
 	for _, args := range commands {
@@ -157,6 +164,9 @@ func TestCreateAndAuthDoNotCopyInProduction(t *testing.T) {
 		})
 		if code != 1 || !strings.Contains(stderr.String(), "not implemented") {
 			t.Fatalf("%v: exit %d stderr %q", args, code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "listening") {
+			t.Fatalf("%v: listened: %s", args, stderr.String())
 		}
 		if stdout.Len() != 0 {
 			t.Fatalf("%v: stdout %q", args, stdout.String())
@@ -306,6 +316,152 @@ func (s *scriptTTY) ReadSecret(prompt string) (string, error) {
 	value := s.secrets[0]
 	s.secrets = s.secrets[1:]
 	return value, nil
+}
+
+func TestAuthDevelopmentEmptyClientDoesNotListen(t *testing.T) {
+	dir := t.TempDir()
+	env := strings.ReplaceAll(exampleEnv(), "you@gmail.com", "dev@example.com")
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(env), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"auth"}, deps{
+		Stdin:   strings.NewReader(""),
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Environ: []string{"APP_ENV=development"},
+		Root:    dir,
+		Authorize: func(context.Context, *config.Config, oauth.Options) error {
+			t.Fatal("Authorize was called")
+			return nil
+		},
+	})
+	if code != 1 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+	text := stderr.String()
+	if !strings.Contains(text, "docs-cli: missing GOOGLE_OAUTH_CLIENT_ID in .env.example") {
+		t.Fatalf("stderr %s", text)
+	}
+	if strings.Contains(text, "listening") || strings.Contains(text, "not implemented") {
+		t.Fatalf("stderr %s", text)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
+		t.Fatalf(".env: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "credentials.json")); !os.IsNotExist(err) {
+		t.Fatalf("credentials: %v", err)
+	}
+}
+
+func TestAuthProductionCopiesEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(exampleEnv()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"auth"}, deps{
+		Stdin:   strings.NewReader(""),
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Environ: []string{"APP_ENV=production"},
+		Root:    dir,
+	})
+	if code != 1 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+	text := stderr.String()
+	if !strings.Contains(text, "docs-cli: copied .env.example to .env") {
+		t.Fatalf("stderr %s", text)
+	}
+	if strings.Contains(text, "listening") || strings.Contains(text, "docs-cli: docs-cli:") {
+		t.Fatalf("stderr %s", text)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "credentials.json")); !os.IsNotExist(err) {
+		t.Fatalf("credentials: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(dir, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf(".env perm=%o", info.Mode().Perm())
+	}
+}
+
+func TestAuthDevelopmentCallsAuthorize(t *testing.T) {
+	dir := t.TempDir()
+	env := strings.ReplaceAll(exampleEnv(), "you@gmail.com", "dev@example.com")
+	env = strings.ReplaceAll(env, "GOOGLE_OAUTH_CLIENT_ID=\n", "GOOGLE_OAUTH_CLIENT_ID=abc.apps.googleusercontent.com\n")
+	env = strings.ReplaceAll(env, "GOOGLE_OAUTH_CLIENT_SECRET=\n", "GOOGLE_OAUTH_CLIENT_SECRET="+secretValue+"\n")
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(env), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"auth"}, deps{
+		Stdin:   strings.NewReader(""),
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Environ: []string{"APP_ENV=development"},
+		Root:    dir,
+		Authorize: func(_ context.Context, cfg *config.Config, opt oauth.Options) error {
+			calls++
+			if !opt.Force {
+				t.Fatal("Force is false")
+			}
+			if cfg.ClientID != "abc.apps.googleusercontent.com" || cfg.ClientSecret != secretValue {
+				t.Fatalf("client id=%q", cfg.ClientID)
+			}
+			if cfg.DriveFolderID != "" {
+				t.Fatalf("folder %q", cfg.DriveFolderID)
+			}
+			fmt.Fprintln(opt.Stderr, "docs-cli: stored refresh token in keyring")
+			return nil
+		},
+	})
+	if code != 0 || calls != 1 {
+		t.Fatalf("exit %d calls %d stderr %s", code, calls, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+	text := stderr.String()
+	if strings.Contains(text, secretValue) || strings.Contains(text, "listening") || strings.Contains(text, "docs-cli: docs-cli:") {
+		t.Fatalf("stderr %s", text)
+	}
+	if !strings.Contains(text, "docs-cli: mode=development file=.env.example") || !strings.Contains(text, "docs-cli: wrote credentials.json") {
+		t.Fatalf("stderr %s", text)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
+		t.Fatalf(".env: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "token.json")); !os.IsNotExist(err) {
+		t.Fatalf("token.json: %v", err)
+	}
+	credPath := filepath.Join(dir, "credentials.json")
+	cred, err := os.ReadFile(credPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(cred, []byte("refresh")) {
+		t.Fatalf("credentials hold a refresh token: %s", cred)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(credPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("credentials perm=%o", info.Mode().Perm())
+		}
+	}
 }
 
 func (s *scriptTTY) WriteStatus(line string) error {
