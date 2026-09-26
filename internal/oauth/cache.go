@@ -193,6 +193,36 @@ func readLegacy(cfg *config.Config) (legacyFile, bool, error) {
 	return leg, true, nil
 }
 
+// SyncRefreshToken stores tok's refresh token when it is non-empty and different
+// from the keyring item. An empty refresh token does not replace a stored one.
+func SyncRefreshToken(cfg *config.Config, src oauth2.TokenSource) error {
+	if cfg == nil || src == nil {
+		return errors.New("docs-cli: error: missing token source")
+	}
+	tok, err := src.Token()
+	if err != nil {
+		return UserTokenError(err, cfg.ClientSecret)
+	}
+	if tok == nil || tok.RefreshToken == "" {
+		return nil
+	}
+	raw, err := keyring.Get(keyringService, keyringUser)
+	if err != nil {
+		if errors.Is(err, keyring.ErrNotFound) {
+			return storeItem(cfg.Scope, tok.RefreshToken)
+		}
+		return errKeyringUnavailable
+	}
+	item, ok := parseStoredItem(raw)
+	if !ok {
+		return errKeyringInvalid
+	}
+	if tok.RefreshToken == item.RefreshToken {
+		return nil
+	}
+	return storeItem(cfg.Scope, tok.RefreshToken)
+}
+
 func deleteLegacyIfRefresh(cfg *config.Config) error {
 	path := tokenPath(cfg)
 	info, err := os.Lstat(path)

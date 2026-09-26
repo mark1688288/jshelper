@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"golang.org/x/oauth2"
+
 	"github.com/mark1688288/jshelper/internal/config"
+	"github.com/mark1688288/jshelper/internal/docs"
 	"github.com/mark1688288/jshelper/internal/oauth"
 )
 
@@ -48,14 +52,14 @@ func TestRun(t *testing.T) {
 		{name: "auth rejects folder", args: []string{"auth", "--folder", "abc"}, code: 2, stderr: "usage: docs-cli"},
 		{name: "setup rejects title", args: []string{"setup", "--title", "Demo"}, code: 2, stderr: "usage: docs-cli"},
 		{name: "setup rejects folder", args: []string{"setup", "--folder", "abc"}, code: 2, stderr: "usage: docs-cli"},
-		{name: "create", args: []string{"create"}, code: 1, stderr: "not implemented"},
+		{name: "create", args: []string{"create"}, code: 1, stderr: "missing .env.example"},
 		{name: "auth", args: []string{"auth"}, code: 1, stderr: "missing .env.example"},
 		{name: "setup", args: []string{"setup"}, code: 1, stderr: "docs-cli: setup refused: development reads .env.example and does not copy or prompt"},
 		{
 			name:   "create with flags",
 			args:   []string{"create", "--title", "Demo", "--text", "hello", "--folder", "abc"},
 			code:   1,
-			stderr: "not implemented",
+			stderr: "not a Drive folder URL or id",
 		},
 	}
 
@@ -119,12 +123,14 @@ func TestSubcommandsLeaveEnvUntouched(t *testing.T) {
 	for _, args := range commands {
 		var stdout, stderr bytes.Buffer
 		code := run(args, deps{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
-		want := "not implemented"
-		switch args[0] {
-		case "setup":
+		want := "missing .env.example"
+		switch {
+		case args[0] == "setup":
 			want = "setup refused"
-		case "auth":
+		case args[0] == "auth":
 			want = "missing .env.example"
+		case len(args) > 1:
+			want = "not a Drive folder URL or id"
 		}
 		if code != 1 || !strings.Contains(stderr.String(), want) {
 			t.Fatalf("%v: exit %d stderr %q", args, code, stderr.String())
@@ -142,41 +148,30 @@ func TestSubcommandsLeaveEnvUntouched(t *testing.T) {
 	}
 }
 
-func TestCreateAndAuthDoNotCopyInProduction(t *testing.T) {
-	t.Setenv("APP_ENV", "production")
+func TestCreateBadFolderDoesNotCopyInProduction(t *testing.T) {
 	dir := t.TempDir()
-	t.Chdir(dir)
 	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(exampleEnv()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	commands := [][]string{
-		{"create"},
-		{"create", "--title", "Demo", "--text", "hello", "--folder", "abc"},
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"create", "--title", "Demo", "--text", "hello", "--folder", "abc"}, deps{
+		Stdin:   strings.NewReader(""),
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Environ: []string{"APP_ENV=production"},
+		Root:    dir,
+	})
+	if code != 1 || !strings.Contains(stderr.String(), "not a Drive folder URL or id") {
+		t.Fatalf("exit %d stderr %q", code, stderr.String())
 	}
-	for _, args := range commands {
-		var stdout, stderr bytes.Buffer
-		code := run(args, deps{
-			Stdin:   strings.NewReader(""),
-			Stdout:  &stdout,
-			Stderr:  &stderr,
-			Environ: []string{"APP_ENV=production"},
-			Root:    dir,
-		})
-		if code != 1 || !strings.Contains(stderr.String(), "not implemented") {
-			t.Fatalf("%v: exit %d stderr %q", args, code, stderr.String())
-		}
-		if strings.Contains(stderr.String(), "listening") {
-			t.Fatalf("%v: listened: %s", args, stderr.String())
-		}
-		if stdout.Len() != 0 {
-			t.Fatalf("%v: stdout %q", args, stdout.String())
-		}
-		if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
-			t.Fatalf("%v: .env created: %v", args, err)
-		}
-		if _, err := os.Stat(filepath.Join(dir, "credentials.json")); !os.IsNotExist(err) {
-			t.Fatalf("%v: credentials created: %v", args, err)
-		}
+	if strings.Contains(stderr.String(), "listening") || stdout.Len() != 0 {
+		t.Fatalf("stdout %q stderr %s", stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
+		t.Fatalf(".env: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "credentials.json")); !os.IsNotExist(err) {
+		t.Fatalf("credentials: %v", err)
 	}
 }
 
@@ -331,9 +326,9 @@ func TestAuthDevelopmentEmptyClientDoesNotListen(t *testing.T) {
 		Stderr:  &stderr,
 		Environ: []string{"APP_ENV=development"},
 		Root:    dir,
-		Authorize: func(context.Context, *config.Config, oauth.Options) error {
+		Authorize: func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error) {
 			t.Fatal("Authorize was called")
-			return nil
+			return nil, nil
 		},
 	})
 	if code != 1 {
@@ -411,7 +406,7 @@ func TestAuthDevelopmentCallsAuthorize(t *testing.T) {
 		Stderr:  &stderr,
 		Environ: []string{"APP_ENV=development"},
 		Root:    dir,
-		Authorize: func(_ context.Context, cfg *config.Config, opt oauth.Options) error {
+		Authorize: func(_ context.Context, cfg *config.Config, opt oauth.Options) (*oauth2.Token, error) {
 			calls++
 			if !opt.Force {
 				t.Fatal("Force is false")
@@ -423,7 +418,7 @@ func TestAuthDevelopmentCallsAuthorize(t *testing.T) {
 				t.Fatalf("folder %q", cfg.DriveFolderID)
 			}
 			fmt.Fprintln(opt.Stderr, "docs-cli: stored refresh token in keyring")
-			return nil
+			return &oauth2.Token{AccessToken: "access-token-value"}, nil
 		},
 	})
 	if code != 0 || calls != 1 {
@@ -471,3 +466,448 @@ func (s *scriptTTY) WriteStatus(line string) error {
 }
 
 var _ config.TTY = (*scriptTTY)(nil)
+
+type failReader struct {
+	t *testing.T
+}
+
+func (r failReader) Read([]byte) (int, error) {
+	r.t.Helper()
+	r.t.Fatal("stdin was read")
+	return 0, io.EOF
+}
+
+type callCount struct {
+	load, ensure, require, write, auth, create int
+}
+
+func (c *callCount) hooks(cfg *config.Config, docID string, docErr error, capture func(title, body, folder string, index int64)) deps {
+	return deps{
+		Load: func(string, []string) (*config.Config, error) {
+			c.load++
+			return cfg, nil
+		},
+		EnsureProductionEnv: func(string, []string, config.TTY) (*config.Config, error) {
+			c.ensure++
+			return cfg, nil
+		},
+		RequireClient: func(*config.Config) error {
+			c.require++
+			return nil
+		},
+		WriteCredentials: func(*config.Config) error {
+			c.write++
+			return nil
+		},
+		Authorize: func(_ context.Context, _ *config.Config, opt oauth.Options) (*oauth2.Token, error) {
+			c.auth++
+			if opt.Force {
+				return nil, fmt.Errorf("docs-cli: error: create set Force")
+			}
+			return &oauth2.Token{AccessToken: "access-token-value"}, nil
+		},
+		CreateDocument: func(_ context.Context, title, body, folder string, index int64) (string, error) {
+			c.create++
+			if capture != nil {
+				capture(title, body, folder, index)
+			}
+			return docID, docErr
+		},
+	}
+}
+
+func TestCreateRejectsBeforeEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(exampleEnv()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	over := strings.Repeat("a", docs.MaxBodyBytes+1)
+	tests := []struct {
+		name string
+		args []string
+		in   string
+		term bool
+		want string
+	}{
+		{name: "big text", args: []string{"create", "--text", over}, want: "body exceeds 1 MiB"},
+		{name: "big stdin", args: []string{"create"}, in: over, want: "body exceeds 1 MiB"},
+		{name: "empty title", args: []string{"create", "--title", ""}, want: "title must not be empty"},
+		{name: "blank title", args: []string{"create", "--title", "   "}, want: "title must not be empty"},
+		{name: "bad folder", args: []string{"create", "--folder", "abc"}, want: "not a Drive folder URL or id"},
+		{name: "docs url", args: []string{"create", "--folder", "https://docs.google.com/document/d/" + folderID + "/edit"}, want: "not a Drive folder URL or id"},
+		{name: "empty folder flag", args: []string{"create", "--folder", ""}, want: "GOOGLE_DRIVE_FOLDER_ID is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls callCount
+			base := calls.hooks(&config.Config{DriveFolderID: folderID, DefaultTitle: "Untitled", InsertIndex: 1, FilePath: filepath.Join(dir, ".env")}, "doc", nil, nil)
+			var stdout, stderr bytes.Buffer
+			base.Stdin = strings.NewReader(tt.in)
+			base.Stdout = &stdout
+			base.Stderr = &stderr
+			base.Environ = []string{"APP_ENV=production"}
+			base.Root = dir
+			base.StdinIsTerminal = tt.term
+			code := run(tt.args, base)
+			if code != 1 || !strings.Contains(stderr.String(), tt.want) {
+				t.Fatalf("exit %d stderr %q", code, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout %q", stdout.String())
+			}
+			if calls.load != 0 || calls.ensure != 0 || calls.require != 0 || calls.write != 0 || calls.auth != 0 || calls.create != 0 {
+				t.Fatalf("calls %+v", calls)
+			}
+			if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
+				t.Fatalf(".env: %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateEmptyFolderSkipsClient(t *testing.T) {
+	dir := t.TempDir()
+	env := strings.ReplaceAll(exampleEnv(), "you@gmail.com", "dev@example.com")
+	env = strings.ReplaceAll(env, "GOOGLE_OAUTH_CLIENT_ID=\n", "GOOGLE_OAUTH_CLIENT_ID=abc.apps.googleusercontent.com\n")
+	env = strings.ReplaceAll(env, "GOOGLE_OAUTH_CLIENT_SECRET=\n", "GOOGLE_OAUTH_CLIENT_SECRET="+secretValue+"\n")
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(env), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var calls callCount
+	base := calls.hooks(nil, "doc", nil, nil)
+	var stdout, stderr bytes.Buffer
+	base.Stdin = strings.NewReader("ignored")
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	base.Load = nil
+	base.RequireClient = func(*config.Config) error {
+		calls.require++
+		return nil
+	}
+	base.WriteCredentials = func(*config.Config) error {
+		calls.write++
+		return nil
+	}
+	base.Authorize = func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error) {
+		calls.auth++
+		return nil, nil
+	}
+	base.CreateDocument = func(context.Context, string, string, string, int64) (string, error) {
+		calls.create++
+		return "doc", nil
+	}
+	code := run([]string{"create", "--title", "Demo", "--text", "hello"}, base)
+	if code != 1 || !strings.Contains(stderr.String(), "docs-cli: GOOGLE_DRIVE_FOLDER_ID is required") {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 || calls.require != 0 || calls.write != 0 || calls.auth != 0 || calls.create != 0 {
+		t.Fatalf("stdout %q calls %+v", stdout.String(), calls)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "credentials.json")); !os.IsNotExist(err) {
+		t.Fatalf("credentials: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
+		t.Fatalf(".env: %v", err)
+	}
+}
+
+func TestCreateFlagFolderOverridesEnv(t *testing.T) {
+	dir := t.TempDir()
+	envFolder := "https://drive.google.com/drive/folders/" + folderID + "?usp=sharing"
+	flagFolder := "ZZ_folder_99"
+	original := readyEnv(envFolder)
+	path := filepath.Join(dir, ".env.example")
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var gotTitle, gotBody, gotFolder string
+	var gotIndex int64
+	var calls callCount
+	base := calls.hooks(nil, "doc1234567890", nil, func(title, body, folder string, index int64) {
+		gotTitle, gotBody, gotFolder, gotIndex = title, body, folder, index
+	})
+	base.Load = nil
+	base.Authorize = func(_ context.Context, _ *config.Config, opt oauth.Options) (*oauth2.Token, error) {
+		calls.auth++
+		if opt.Force {
+			t.Fatal("Force")
+		}
+		return &oauth2.Token{AccessToken: "access-token-value"}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdin = failReader{t: t}
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"create", "--text", " hello ", "--folder", "  " + flagFolder + "  "}, base)
+	if code != 0 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	if gotFolder != flagFolder || gotTitle != "Untitled" || gotBody != " hello " || gotIndex != 1 {
+		t.Fatalf("title %q body %q folder %q index %d", gotTitle, gotBody, gotFolder, gotIndex)
+	}
+	if calls.load != 0 || calls.ensure != 0 || calls.create != 1 || calls.auth != 1 {
+		t.Fatalf("calls %+v", calls)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Fatalf("env rewritten:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
+		t.Fatalf(".env: %v", err)
+	}
+}
+
+func TestCreateTextWinsAndTerminalIsEmpty(t *testing.T) {
+	cfg := &config.Config{
+		Mode:          "development",
+		FilePath:      "/tmp/.env.example",
+		DriveFolderID: folderID,
+		DefaultTitle:  "From Env",
+		InsertIndex:   1,
+		ClientID:      "abc.apps.googleusercontent.com",
+		ClientSecret:  secretValue,
+	}
+	t.Run("flag wins", func(t *testing.T) {
+		var got string
+		var calls callCount
+		base := calls.hooks(cfg, "doc1234567890", nil, func(_, body, _ string, _ int64) { got = body })
+		var stdout, stderr bytes.Buffer
+		base.Stdin = failReader{t: t}
+		base.Stdout = &stdout
+		base.Stderr = &stderr
+		base.Environ = []string{"APP_ENV=development"}
+		base.Root = t.TempDir()
+		code := run([]string{"create", "--title", "  Demo  ", "--text", "from-flag"}, base)
+		if code != 0 || got != "from-flag" {
+			t.Fatalf("exit %d body %q stderr %s", code, got, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "docs-cli: created document doc1234567890") || !strings.Contains(stderr.String(), "docs-cli: body_bytes=9") {
+			t.Fatalf("stderr %s", stderr.String())
+		}
+	})
+	t.Run("terminal empty", func(t *testing.T) {
+		var gotTitle, gotBody string
+		var calls callCount
+		base := calls.hooks(cfg, "doc1234567890", nil, func(title, body, _ string, _ int64) {
+			gotTitle, gotBody = title, body
+		})
+		var stdout, stderr bytes.Buffer
+		base.Stdin = failReader{t: t}
+		base.StdinIsTerminal = true
+		base.Stdout = &stdout
+		base.Stderr = &stderr
+		base.Environ = []string{"APP_ENV=development"}
+		base.Root = t.TempDir()
+		code := run([]string{"create", "--title", "Demo"}, base)
+		if code != 0 || gotBody != "" || gotTitle != "Demo" {
+			t.Fatalf("exit %d title %q body %q stderr %s", code, gotTitle, gotBody, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "docs-cli: body_bytes=0") {
+			t.Fatalf("stderr %s", stderr.String())
+		}
+	})
+	t.Run("empty text skips stdin", func(t *testing.T) {
+		var got string
+		var calls callCount
+		base := calls.hooks(cfg, "doc1234567890", nil, func(_, body, _ string, _ int64) { got = body })
+		var stdout, stderr bytes.Buffer
+		base.Stdin = strings.NewReader("from-stdin")
+		base.Stdout = &stdout
+		base.Stderr = &stderr
+		base.Environ = []string{"APP_ENV=development"}
+		base.Root = t.TempDir()
+		code := run([]string{"create", "--title", "Demo", "--text", ""}, base)
+		if code != 0 || got != "" {
+			t.Fatalf("exit %d body %q stderr %s", code, got, stderr.String())
+		}
+	})
+	t.Run("newline stdin", func(t *testing.T) {
+		var got string
+		var calls callCount
+		base := calls.hooks(cfg, "doc1234567890", nil, func(_, body, _ string, _ int64) { got = body })
+		var stdout, stderr bytes.Buffer
+		base.Stdin = strings.NewReader("\n")
+		base.Stdout = &stdout
+		base.Stderr = &stderr
+		base.Environ = []string{"APP_ENV=development"}
+		base.Root = t.TempDir()
+		code := run([]string{"create", "--title", "Demo"}, base)
+		if code != 0 || got != "\n" {
+			t.Fatalf("exit %d body %q", code, got)
+		}
+	})
+}
+
+func TestCreateSuccessStdout(t *testing.T) {
+	dir := t.TempDir()
+	raw := "https://drive.google.com/drive/folders/" + folderID + "?usp=sharing"
+	original := readyEnv(raw)
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const docID = "doc1234567890"
+	var gotFolder, gotTitle, gotBody string
+	var calls callCount
+	base := calls.hooks(nil, docID, nil, func(title, body, folder string, _ int64) {
+		gotTitle, gotBody, gotFolder = title, body, folder
+	})
+	base.Load = nil
+	base.WriteCredentials = nil
+	base.RequireClient = nil
+	base.Authorize = func(_ context.Context, cfg *config.Config, opt oauth.Options) (*oauth2.Token, error) {
+		calls.auth++
+		if opt.Force {
+			t.Fatal("Force")
+		}
+		if cfg.DriveFolderID != folderID {
+			t.Fatalf("loaded folder %q", cfg.DriveFolderID)
+		}
+		return &oauth2.Token{AccessToken: "access-token-value"}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdin = strings.NewReader("from-stdin")
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"create", "--text", "hello"}, base)
+	if code != 0 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	wantOut := docID + "\n" + docs.EditURL(docID) + "\n"
+	if stdout.String() != wantOut {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "docs-cli:") {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+	text := stderr.String()
+	if strings.Contains(text, "docs-cli: docs-cli:") || strings.Contains(text, secretValue) {
+		t.Fatalf("stderr %s", text)
+	}
+	if !strings.Contains(text, "docs-cli: mode=development file=.env.example") || !strings.Contains(text, "docs-cli: created document "+docID) || !strings.Contains(text, "docs-cli: body_bytes=5") {
+		t.Fatalf("stderr %s", text)
+	}
+	if gotFolder != folderID || gotTitle != "Untitled" || gotBody != "hello" {
+		t.Fatalf("title %q body %q folder %q", gotTitle, gotBody, gotFolder)
+	}
+	if calls.ensure != 0 || calls.create != 1 {
+		t.Fatalf("calls %+v", calls)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
+		t.Fatalf(".env: %v", err)
+	}
+	credPath := filepath.Join(dir, "credentials.json")
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(credPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("perm %o", info.Mode().Perm())
+		}
+	}
+	cred, err := os.ReadFile(credPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(cred, []byte("refresh")) || bytes.Contains(cred, []byte(raw)) {
+		t.Fatalf("credentials %s", cred)
+	}
+}
+
+func TestCreateInsertFailureIsNotSuccess(t *testing.T) {
+	cfg := &config.Config{
+		Mode:          "development",
+		FilePath:      "/tmp/.env.example",
+		DriveFolderID: folderID,
+		DefaultTitle:  "Untitled",
+		InsertIndex:   1,
+	}
+	const docID = "doc1234567890"
+	var calls callCount
+	base := calls.hooks(cfg, docID, fmt.Errorf("docs-cli: insertText failed; document was created: %s", docID), nil)
+	var stdout, stderr bytes.Buffer
+	base.Stdin = strings.NewReader("")
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = t.TempDir()
+	code := run([]string{"create", "--title", "Demo", "--text", "hello"}, base)
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if stdout.Len() != 0 || strings.Contains(stdout.String(), docs.EditURL(docID)) {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+	text := stderr.String()
+	if !strings.Contains(text, "docs-cli: insertText failed; document was created: "+docID) || strings.Contains(text, docs.EditURL(docID)) || strings.Contains(text, "docs-cli: created document") {
+		t.Fatalf("stderr %s", text)
+	}
+}
+
+func TestCreateProductionUsesWizard(t *testing.T) {
+	cfg := &config.Config{
+		Mode:          "production",
+		FilePath:      "/tmp/.env",
+		DriveFolderID: folderID,
+		DefaultTitle:  "Untitled",
+		InsertIndex:   1,
+	}
+	var calls callCount
+	base := calls.hooks(cfg, "doc1234567890", nil, nil)
+	var stdout, stderr bytes.Buffer
+	base.Stdin = strings.NewReader("")
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=production"}
+	base.Root = t.TempDir()
+	code := run([]string{"create", "--title", "Demo", "--text", "hello"}, base)
+	if code != 0 || calls.ensure != 1 || calls.load != 0 || calls.create != 1 {
+		t.Fatalf("exit %d calls %+v stderr %s", code, calls, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "docs-cli: mode=production file=.env") {
+		t.Fatalf("stderr %s", stderr.String())
+	}
+}
+
+func TestCreateExactCapReachesCreate(t *testing.T) {
+	cfg := &config.Config{
+		Mode:          "development",
+		FilePath:      "/tmp/.env.example",
+		DriveFolderID: folderID,
+		DefaultTitle:  "Untitled",
+		InsertIndex:   1,
+	}
+	body := strings.Repeat("a", docs.MaxBodyBytes)
+	var got int
+	var calls callCount
+	base := calls.hooks(cfg, "doc1234567890", nil, func(_, text, _ string, _ int64) { got = len(text) })
+	var stdout, stderr bytes.Buffer
+	base.Stdin = strings.NewReader("")
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = t.TempDir()
+	code := run([]string{"create", "--title", "Demo", "--text", body}, base)
+	if code != 0 || got != docs.MaxBodyBytes || calls.create != 1 {
+		t.Fatalf("exit %d len %d calls %+v stderr %s", code, got, calls, stderr.String())
+	}
+}
+
+func readyEnv(folder string) string {
+	env := strings.ReplaceAll(exampleEnv(), "you@gmail.com", "dev@example.com")
+	env = strings.ReplaceAll(env, "GOOGLE_OAUTH_CLIENT_ID=\n", "GOOGLE_OAUTH_CLIENT_ID=abc.apps.googleusercontent.com\n")
+	env = strings.ReplaceAll(env, "GOOGLE_OAUTH_CLIENT_SECRET=\n", "GOOGLE_OAUTH_CLIENT_SECRET="+secretValue+"\n")
+	if folder != "" {
+		env = strings.ReplaceAll(env, "GOOGLE_DRIVE_FOLDER_ID=\n", "GOOGLE_DRIVE_FOLDER_ID="+folder+"\n")
+	}
+	return env
+}
