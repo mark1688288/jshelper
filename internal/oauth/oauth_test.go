@@ -818,3 +818,72 @@ func assertDirClean(t *testing.T, root, refresh string) {
 		t.Fatal(err)
 	}
 }
+
+func TestSyncRefreshTokenPreservesOmittedRefresh(t *testing.T) {
+	withMock(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"`+testAccess+`","token_type":"Bearer","expires_in":3600}`)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := testConfig(t, srv.URL)
+	if err := keyring.Set(keyringService, keyringUser, `{"refresh_token":"`+testRefresh+`","scope":"`+driveScope+`"}`); err != nil {
+		t.Fatal(err)
+	}
+	src := TokenSource(context.Background(), cfg, &oauth2.Token{
+		AccessToken:  "expired-access-token",
+		RefreshToken: testRefresh,
+		Expiry:       time.Now().Add(-time.Hour),
+	})
+	if err := SyncRefreshToken(cfg, src); err != nil {
+		t.Fatal(err)
+	}
+	assertStored(t, testRefresh, driveScope)
+}
+
+func TestSyncRefreshTokenStoresRotatedRefresh(t *testing.T) {
+	withMock(t)
+	const rotated = "refresh-token-value-2"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"`+testAccess+`","refresh_token":"`+rotated+`","token_type":"Bearer","expires_in":3600}`)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := testConfig(t, srv.URL)
+	if err := keyring.Set(keyringService, keyringUser, `{"refresh_token":"`+testRefresh+`","scope":"`+driveScope+`"}`); err != nil {
+		t.Fatal(err)
+	}
+	src := TokenSource(context.Background(), cfg, &oauth2.Token{
+		AccessToken:  "expired-access-token",
+		RefreshToken: testRefresh,
+		Expiry:       time.Now().Add(-time.Hour),
+	})
+	if err := SyncRefreshToken(cfg, src); err != nil {
+		t.Fatal(err)
+	}
+	assertStored(t, rotated, driveScope)
+}
+
+func TestSyncRefreshTokenIgnoresEmptyRefresh(t *testing.T) {
+	withMock(t)
+	cfg := testConfig(t, "https://oauth2.googleapis.com/token")
+	if err := keyring.Set(keyringService, keyringUser, `{"refresh_token":"`+testRefresh+`","scope":"`+driveScope+`"}`); err != nil {
+		t.Fatal(err)
+	}
+	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: testAccess})
+	if err := SyncRefreshToken(cfg, src); err != nil {
+		t.Fatal(err)
+	}
+	assertStored(t, testRefresh, driveScope)
+}
+
+func TestUserTokenErrorInvalidGrant(t *testing.T) {
+	err := UserTokenError(&oauth2.RetrieveError{ErrorCode: "invalid_grant", ErrorDescription: "expired"}, testRefresh)
+	want := "docs-cli: refresh failed; run docs-cli auth (a Testing-mode refresh token expires after 7 days; invalid_grant has other causes)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err %v", err)
+	}
+	if strings.Contains(err.Error(), testRefresh) {
+		t.Fatalf("leaked %v", err)
+	}
+}

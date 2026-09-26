@@ -19,10 +19,11 @@ import (
 const driveScope = "https://www.googleapis.com/auth/drive"
 
 var (
-	errInvalidScope = errors.New("docs-cli: invalid_scope; add https://www.googleapis.com/auth/drive under Google Auth platform → Data Access, then run docs-cli auth")
-	errRedirectURI  = errors.New("docs-cli: redirect_uri_mismatch; the OAuth client must be a Desktop installed client, not a Web or IAP client")
-	errScopeGrant   = errors.New("docs-cli: token response did not grant https://www.googleapis.com/auth/drive")
-	errNoRefresh    = errors.New("docs-cli: error: token response did not include a refresh token")
+	errInvalidScope  = errors.New("docs-cli: invalid_scope; add https://www.googleapis.com/auth/drive under Google Auth platform → Data Access, then run docs-cli auth")
+	errRedirectURI   = errors.New("docs-cli: redirect_uri_mismatch; the OAuth client must be a Desktop installed client, not a Web or IAP client")
+	errScopeGrant    = errors.New("docs-cli: token response did not grant https://www.googleapis.com/auth/drive")
+	errNoRefresh     = errors.New("docs-cli: error: token response did not include a refresh token")
+	errRefreshFailed = errors.New("docs-cli: refresh failed; run docs-cli auth (a Testing-mode refresh token expires after 7 days; invalid_grant has other causes)")
 )
 
 // Options controls one authorization.
@@ -123,6 +124,28 @@ func interactive(ctx context.Context, cfg *config.Config, opt Options, stderr io
 		return nil, err
 	}
 	return tok, nil
+}
+
+// TokenSource refreshes tok with cfg. The returned source does not write the keyring.
+func TokenSource(ctx context.Context, cfg *config.Config, tok *oauth2.Token) oauth2.TokenSource {
+	return oauthConfig(cfg, cfg.RedirectURI).TokenSource(ctx, tok)
+}
+
+// UserTokenError maps a refresh failure. invalid_grant keeps the keyring item.
+func UserTokenError(err error, secrets ...string) error {
+	if err == nil {
+		return nil
+	}
+	var retrieve *oauth2.RetrieveError
+	if errors.As(err, &retrieve) {
+		if retrieve.ErrorCode == "invalid_grant" || strings.Contains(retrieve.ErrorDescription, "invalid_grant") {
+			return errRefreshFailed
+		}
+	}
+	if strings.Contains(err.Error(), "invalid_grant") {
+		return errRefreshFailed
+	}
+	return fmt.Errorf("docs-cli: error: %s", mask(err.Error(), secrets...))
 }
 
 func oauthConfig(cfg *config.Config, redirect string) *oauth2.Config {
