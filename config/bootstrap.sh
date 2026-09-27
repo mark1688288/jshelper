@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # One-time Google Cloud setup for the Docs CLI.
 #
-# Automated: create the project if missing, enable the Docs and Drive APIs,
-# and write credentials.json once the Desktop client id/secret are in the env file.
+# Automated: create the project if missing and enable the Docs and Drive APIs.
+# Development also writes credentials.json once the Desktop client id and secret
+# are in the env file. Production does not: docs-cli writes that file.
 # Not automated: Google Auth platform has no stable CLI for a Desktop client.
-# Branding, Audience (External / Testing / test user), scope, and Clients
+# Branding, Audience (External / Testing / test user), Data Access, and Clients
 # stay a one-time Console pass. IAP oauth-clients are a different client type
 # and are intentionally not used here.
 #
@@ -157,6 +158,7 @@ fi
 
 BRANDING_URL="https://console.cloud.google.com/auth/branding?project=${GCP_PROJECT_ID}"
 AUDIENCE_URL="https://console.cloud.google.com/auth/audience?project=${GCP_PROJECT_ID}"
+DATA_ACCESS_URL="https://console.cloud.google.com/auth/scopes?project=${GCP_PROJECT_ID}"
 CLIENTS_URL="https://console.cloud.google.com/auth/clients?project=${GCP_PROJECT_ID}"
 DOCS_LIBRARY_URL="https://console.cloud.google.com/apis/library/docs.googleapis.com?project=${GCP_PROJECT_ID}"
 DRIVE_LIBRARY_URL="https://console.cloud.google.com/apis/library/drive.googleapis.com?project=${GCP_PROJECT_ID}"
@@ -170,6 +172,7 @@ if [[ "$MODE" == "check" ]]; then
     echo "oauth_client=missing"
     echo "next: branding  $BRANDING_URL"
     echo "next: audience  $AUDIENCE_URL"
+    echo "next: data-access  $DATA_ACCESS_URL"
     echo "next: clients   $CLIENTS_URL"
   fi
   echo "insert_index=$DOCS_INSERT_INDEX scope=$GOOGLE_OAUTH_SCOPE"
@@ -214,9 +217,16 @@ if [[ "$has_client" == "0" ]]; then
   echo "   $BRANDING_URL"
   echo "2. Audience: $GOOGLE_OAUTH_USER_TYPE / $GOOGLE_OAUTH_PUBLISHING_STATUS, test user $GOOGLE_OAUTH_TEST_USER"
   echo "   $AUDIENCE_URL"
-  echo "3. Clients: create Desktop app named $GOOGLE_OAUTH_CLIENT_NAME"
+  echo "3. Data Access: add only $GOOGLE_OAUTH_SCOPE"
+  echo "   $DATA_ACCESS_URL"
+  echo "4. Clients: create Desktop app named $GOOGLE_OAUTH_CLIENT_NAME"
   echo "   $CLIENTS_URL"
-  echo "4. Put the client id and secret into $(basename "$ENV_FILE"), then rerun this script."
+  if [[ "$APP_ENV" == "production" ]]; then
+    echo "5. Put the client id and secret into $(basename "$ENV_FILE"), then run ./docs-cli setup again."
+  else
+    echo "5. Put the client id and secret into $(basename "$ENV_FILE"), then rerun this script."
+  fi
+  echo "   The browser consent flow does not create the client id. Run docs-cli auth after the id and secret are stored."
   echo "API pages: $DOCS_LIBRARY_URL"
   echo "           $DRIVE_LIBRARY_URL"
   if [[ "$OPEN_BROWSER" == "1" ]]; then
@@ -224,6 +234,11 @@ if [[ "$has_client" == "0" ]]; then
       xdg-open "$CLIENTS_URL" >/dev/null 2>&1 || true
     fi
   fi
+  exit 0
+fi
+
+if [[ "$has_client" == "1" && "$APP_ENV" == "production" ]]; then
+  echo "project ready. production credentials.json is written by docs-cli, not this script."
   exit 0
 fi
 
