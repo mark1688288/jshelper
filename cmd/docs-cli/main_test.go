@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,13 @@ import (
 	"github.com/mark1688288/jshelper/internal/docs"
 	"github.com/mark1688288/jshelper/internal/oauth"
 )
+
+func TestMain(m *testing.M) {
+	config.SetProjectBootstrapForTest(func(string, []string, io.Writer) error {
+		return errors.New("docs-cli: bootstrap not stubbed")
+	})
+	os.Exit(m.Run())
+}
 
 func TestRun(t *testing.T) {
 	t.Setenv("APP_ENV", "production")
@@ -181,16 +189,24 @@ func TestSetupProduction(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(exampleEnv()), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	var bootstrapCalls int
+	config.SetProjectBootstrapForTest(func(string, []string, io.Writer) error {
+		bootstrapCalls++
+		return nil
+	})
+	t.Cleanup(func() {
+		config.SetProjectBootstrapForTest(func(string, []string, io.Writer) error {
+			return errors.New("docs-cli: bootstrap not stubbed")
+		})
+	})
 	tty := &scriptTTY{
 		lines: []string{
 			"",
 			"",
 			"dev@example.com",
 			"dev@example.com",
-			"abc.apps.googleusercontent.com",
 			"https://drive.google.com/drive/folders/" + folderID + "?usp=sharing",
 		},
-		secrets: []string{secretValue},
 	}
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup"}, deps{
@@ -208,28 +224,44 @@ func TestSetupProduction(t *testing.T) {
 		t.Fatalf("stdout %q", stdout.String())
 	}
 	text := stderr.String()
-	if !strings.Contains(text, "docs-cli: mode=production file=.env\n") {
+	if !strings.Contains(text, "建立 Desktop app「Docs CLI Desktop」後再執行 ./docs-cli setup") || !strings.Contains(text, "docs-cli: copied .env.example to .env") {
 		t.Fatalf("stderr %s", text)
 	}
-	if strings.Contains(text, "docs-cli: docs-cli:") {
-		t.Fatalf("doubled prefix:\n%s", text)
-	}
-	if !strings.Contains(text, "docs-cli: copied .env.example to .env") || !strings.Contains(text, "docs-cli: wrote credentials.json") {
+	if strings.Contains(text, "docs-cli: wrote credentials.json") || strings.Contains(text, "docs-cli: mode=") || strings.Contains(text, secretValue) {
 		t.Fatalf("stderr %s", text)
 	}
-	if strings.Contains(text, secretValue) || strings.Contains(tty.buf.String(), secretValue) {
-		t.Fatal("secret leaked")
+	if bootstrapCalls != 1 {
+		t.Fatalf("bootstrap calls=%d", bootstrapCalls)
 	}
-	envText, err := os.ReadFile(filepath.Join(dir, ".env"))
-	if err != nil {
-		t.Fatal(err)
+	second := &scriptTTY{lines: []string{"abc.apps.googleusercontent.com"}, secrets: []string{secretValue}}
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"setup"}, deps{
+		Stdin:   strings.NewReader(""),
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Environ: []string{"APP_ENV=production"},
+		Root:    dir,
+		TTY:     second,
+	})
+	if code != 0 {
+		t.Fatalf("second exit %d stderr %s", code, stderr.String())
 	}
-	if !bytes.Contains(envText, []byte("GOOGLE_DRIVE_FOLDER_ID="+folderID)) || bytes.Contains(envText, []byte("usp=sharing")) {
-		t.Fatalf("env:\n%s", envText)
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout %q", stdout.String())
 	}
-	credPath := filepath.Join(dir, "credentials.json")
+	text = stderr.String()
+	if !strings.Contains(text, "docs-cli: wrote credentials.json") || !strings.Contains(text, "docs-cli: mode=production file=.env") {
+		t.Fatalf("stderr %s", text)
+	}
+	if strings.Contains(text, "建立 Desktop app") || strings.Contains(text, secretValue) || strings.Contains(second.buf.String(), secretValue) {
+		t.Fatalf("stderr %s\ntty %s", text, second.buf.String())
+	}
+	if bootstrapCalls != 1 {
+		t.Fatalf("bootstrap calls=%d", bootstrapCalls)
+	}
 	if runtime.GOOS != "windows" {
-		info, err := os.Stat(credPath)
+		info, err := os.Stat(filepath.Join(dir, "credentials.json"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -243,6 +275,70 @@ func TestSetupProduction(t *testing.T) {
 		if info.Mode().Perm() != 0o600 {
 			t.Fatalf(".env perm=%o", info.Mode().Perm())
 		}
+	}
+}
+
+func TestSetupPauseExitsZero(t *testing.T) {
+	var creds, authz int
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup"}, deps{
+		Stdin:   strings.NewReader(""),
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Environ: []string{"APP_ENV=production"},
+		Root:    t.TempDir(),
+		EnsureProductionEnv: func(string, []string, config.TTY) (*config.Config, error) {
+			return nil, config.ErrDesktopClientRequired
+		},
+		WriteCredentials: func(*config.Config) error {
+			creds++
+			return nil
+		},
+		Authorize: func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error) {
+			authz++
+			return nil, nil
+		},
+	})
+	if code != 0 || stdout.Len() != 0 || creds != 0 || authz != 0 {
+		t.Fatalf("exit %d creds %d auth %d stdout %q stderr %s", code, creds, authz, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), config.ErrDesktopClientRequired.Error()) {
+		t.Fatalf("stderr %s", stderr.String())
+	}
+}
+
+func TestAuthPauseDoesNotListen(t *testing.T) {
+	assertPauseSkipsWork(t, []string{"auth"})
+}
+
+func TestCreatePauseDoesNotListen(t *testing.T) {
+	assertPauseSkipsWork(t, []string{"create", "--title", "Demo", "--text", "hello"})
+}
+
+func assertPauseSkipsWork(t *testing.T, args []string) {
+	t.Helper()
+	var authz, created int
+	var stdout, stderr bytes.Buffer
+	code := run(args, deps{
+		Stdin:   strings.NewReader(""),
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Environ: []string{"APP_ENV=production"},
+		Root:    t.TempDir(),
+		EnsureProductionEnv: func(string, []string, config.TTY) (*config.Config, error) {
+			return nil, config.ErrDesktopClientRequired
+		},
+		Authorize: func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error) {
+			authz++
+			return nil, nil
+		},
+		CreateDocument: func(context.Context, string, string, string, int64) (string, error) {
+			created++
+			return "", nil
+		},
+	})
+	if code != 1 || authz != 0 || created != 0 || strings.Contains(stderr.String(), "listening") {
+		t.Fatalf("%v exit %d auth %d create %d stderr %s", args, code, authz, created, stderr.String())
 	}
 }
 
@@ -357,6 +453,17 @@ func TestAuthProductionCopiesEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(exampleEnv()), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	var bootstrapCalls int
+	config.SetProjectBootstrapForTest(func(string, []string, io.Writer) error {
+		bootstrapCalls++
+		t.Errorf("bootstrap called")
+		return errors.New("docs-cli: bootstrap not stubbed")
+	})
+	t.Cleanup(func() {
+		config.SetProjectBootstrapForTest(func(string, []string, io.Writer) error {
+			return errors.New("docs-cli: bootstrap not stubbed")
+		})
+	})
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"auth"}, deps{
 		Stdin:   strings.NewReader(""),
@@ -374,6 +481,12 @@ func TestAuthProductionCopiesEnv(t *testing.T) {
 	text := stderr.String()
 	if !strings.Contains(text, "docs-cli: copied .env.example to .env") {
 		t.Fatalf("stderr %s", text)
+	}
+	if !strings.Contains(text, "docs-cli: production env is incomplete; run docs-cli setup in a terminal") {
+		t.Fatalf("stderr %s", text)
+	}
+	if bootstrapCalls != 0 {
+		t.Fatalf("bootstrap calls=%d", bootstrapCalls)
 	}
 	if strings.Contains(text, "listening") || strings.Contains(text, "docs-cli: docs-cli:") {
 		t.Fatalf("stderr %s", text)

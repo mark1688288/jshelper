@@ -279,6 +279,10 @@ func runSetup(args []string, d deps) int {
 	existed := envExisted(root)
 	cfg, err := d.ensureProduction(root, d.Environ, tty)
 	noteEnvCopy(d, root, existed)
+	if errors.Is(err, config.ErrDesktopClientRequired) {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 0
+	}
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1

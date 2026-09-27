@@ -16,6 +16,23 @@ import (
 // outside production.
 var ErrDevelopmentWizard = errors.New("docs-cli: setup refused: development reads .env.example and does not copy or prompt")
 
+// ErrDesktopClientRequired means bootstrap finished and this call must stop
+// before asking for a client id. The text has no docs-cli: prefix.
+var ErrDesktopClientRequired = errors.New("建立 Desktop app「Docs CLI Desktop」後再執行 ./docs-cli setup")
+
+const (
+	projectReadyKey    = "DOCS_CLI_PROJECT_READY"
+	bootstrapFailedKey = "DOCS_CLI_BOOTSTRAP_FAILED"
+
+	projectNotReady              = "docs-cli: 專案尚未標成就緒。若 GCP_PROJECT_ID 已被佔用或是保留字，請改 .env 的 GCP_PROJECT_ID，再執行 ./docs-cli setup。"
+	invalidClientBeforeBootstrap = "docs-cli: invalid GOOGLE_OAUTH_CLIENT_ID\ndocs-cli: 清掉 .env 的 GOOGLE_OAUTH_CLIENT_ID，或改成這個專案的 Desktop client id，再執行 ./docs-cli setup。"
+	staleMarkerCleared           = "已清掉 client id、secret 與專案就緒標記：GCP_PROJECT_ID 與標記不一致，Desktop client 留在舊專案。"
+)
+
+// wizardStderr receives the stale-marker notice. Bootstrap output uses the
+// same writer so Console URLs stay on the process stderr stream.
+var wizardStderr io.Writer = os.Stderr
+
 // copyEnvData, chmodEnv, and beforeEnvRename are replaced by tests.
 var (
 	copyEnvData = func(dst io.Writer, src io.Reader) error {
@@ -28,14 +45,17 @@ var (
 
 var plainEnvValue = regexp.MustCompile(`^[A-Za-z0-9_./:@+-]+$`)
 
-var wizardKeys = []string{
+var phase1Keys = []string{
 	"GCP_PROJECT_ID",
 	"GCP_PROJECT_NAME",
 	"GOOGLE_OAUTH_SUPPORT_EMAIL",
 	"GOOGLE_OAUTH_TEST_USER",
+	"GOOGLE_DRIVE_FOLDER_ID",
+}
+
+var phase2Keys = []string{
 	"GOOGLE_OAUTH_CLIENT_ID",
 	"GOOGLE_OAUTH_CLIENT_SECRET",
-	"GOOGLE_DRIVE_FOLDER_ID",
 }
 
 // EnsureProductionEnv copies .env.example to .env when needed and asks for
@@ -68,11 +88,60 @@ func EnsureProductionEnv(root string, environ []string, tty TTY) (*Config, error
 	if key := fixedKeyProblem(absRoot, vals); key != "" {
 		return nil, fmt.Errorf("docs-cli: invalid %s in .env; this program will not replace an existing .env", key)
 	}
-	keys := keysToAsk(vals, created)
-	if len(keys) > 0 && (tty == nil || !tty.IsTerminal()) {
+	content := string(data)
+	content, err = clearStaleProjectMarker(absRoot, content, vals)
+	if err != nil {
+		return nil, err
+	}
+	keys := phase1KeysToAsk(vals, created)
+	if len(keys) > 0 && !terminalReady(tty) {
 		return nil, ErrNeedTerminal
 	}
-	content := string(data)
+	for _, key := range keys {
+		prev := vals[key]
+		value, err := askWizard(tty, key, prev)
+		if err != nil {
+			return nil, err
+		}
+		content = upsertEnvKey(content, key, value)
+		if key == "GCP_PROJECT_ID" && value != prev {
+			content = clearClientAndMarker(content)
+			vals["GOOGLE_OAUTH_CLIENT_ID"] = ""
+			vals["GOOGLE_OAUTH_CLIENT_SECRET"] = ""
+			vals[projectReadyKey] = ""
+		}
+		if err := writeEnvAtomic(absRoot, content); err != nil {
+			return nil, err
+		}
+		vals[key] = value
+	}
+	content, vals, err = readEnvContent(path)
+	if err != nil {
+		return nil, err
+	}
+	if !phase1Ready(vals) {
+		return nil, fmt.Errorf("docs-cli: invalid %s", firstBadPhase1(vals))
+	}
+	if !markerBound(vals) {
+		if id := vals["GOOGLE_OAUTH_CLIENT_ID"]; id != "" && !clientIDPattern.MatchString(id) {
+			return nil, errors.New(invalidClientBeforeBootstrap)
+		}
+		if err := runProjectBootstrap(absRoot, environ, noticeWriter()); err != nil {
+			wrapped := ensureBootstrapFailed(err)
+			if werr := writeBootstrapFailure(absRoot, path); werr != nil {
+				return nil, fmt.Errorf("%s\n%w\n%v", projectNotReady, wrapped, werr)
+			}
+			return nil, fmt.Errorf("%s\n%w", projectNotReady, wrapped)
+		}
+		if err := writeBootstrapSuccess(absRoot, path); err != nil {
+			return nil, err
+		}
+		return nil, ErrDesktopClientRequired
+	}
+	keys = phase2KeysToAsk(vals)
+	if len(keys) > 0 && !terminalReady(tty) {
+		return nil, ErrNeedTerminal
+	}
 	for _, key := range keys {
 		value, err := askWizard(tty, key, vals[key])
 		if err != nil {
@@ -87,11 +156,7 @@ func EnsureProductionEnv(root string, environ []string, tty TTY) (*Config, error
 			writeStatus(tty, "已寫入 GOOGLE_OAUTH_CLIENT_SECRET")
 		}
 	}
-	data, err = os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("docs-cli: read %s: %w", path, err)
-	}
-	vals, err = parseEnv(path, data)
+	_, vals, err = readEnvContent(path)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +170,7 @@ func EnsureProductionEnv(root string, environ []string, tty TTY) (*Config, error
 	if cfg.ClientID == "" {
 		return nil, errors.New("docs-cli: invalid GOOGLE_OAUTH_CLIENT_ID")
 	}
-	if cfg.ClientSecret == "" {
+	if strings.TrimSpace(cfg.ClientSecret) == "" {
 		return nil, errors.New("docs-cli: invalid GOOGLE_OAUTH_CLIENT_SECRET")
 	}
 	return cfg, nil
@@ -115,14 +180,130 @@ func modeLine(mode, file string) string {
 	return "docs-cli: mode=" + mode + " file=" + file
 }
 
-func keysToAsk(vals map[string]string, askAll bool) []string {
+func phase1KeysToAsk(vals map[string]string, created bool) []string {
+	failed := vals[bootstrapFailedKey] == "1"
+	bound := markerBound(vals)
 	var keys []string
-	for _, key := range wizardKeys {
-		if askAll || !wizardValueOK(key, vals[key]) {
+	for _, key := range phase1Keys {
+		force := false
+		switch key {
+		case "GCP_PROJECT_ID":
+			force = created || (failed && !bound)
+		case "GCP_PROJECT_NAME":
+			force = created
+		}
+		if force || !wizardValueOK(key, vals[key]) {
 			keys = append(keys, key)
 		}
 	}
 	return keys
+}
+
+func phase2KeysToAsk(vals map[string]string) []string {
+	var keys []string
+	for _, key := range phase2Keys {
+		if !wizardValueOK(key, vals[key]) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func markerBound(vals map[string]string) bool {
+	id := vals["GCP_PROJECT_ID"]
+	return id != "" && vals[projectReadyKey] == id
+}
+
+func phase1Ready(vals map[string]string) bool {
+	for _, key := range phase1Keys {
+		if !wizardValueOK(key, vals[key]) {
+			return false
+		}
+	}
+	return true
+}
+
+func firstBadPhase1(vals map[string]string) string {
+	for _, key := range phase1Keys {
+		if !wizardValueOK(key, vals[key]) {
+			return key
+		}
+	}
+	return "GCP_PROJECT_ID"
+}
+
+func terminalReady(tty TTY) bool {
+	return tty != nil && tty.IsTerminal()
+}
+
+func noticeWriter() io.Writer {
+	if wizardStderr == nil {
+		return os.Stderr
+	}
+	return wizardStderr
+}
+
+func readEnvContent(path string) (string, map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", nil, fmt.Errorf("docs-cli: read %s: %w", path, err)
+	}
+	vals, err := parseEnv(path, data)
+	if err != nil {
+		return "", nil, err
+	}
+	return string(data), vals, nil
+}
+
+func clearClientAndMarker(content string) string {
+	content = upsertEnvKey(content, "GOOGLE_OAUTH_CLIENT_ID", "")
+	content = upsertEnvKey(content, "GOOGLE_OAUTH_CLIENT_SECRET", "")
+	return upsertEnvKey(content, projectReadyKey, "")
+}
+
+func clearStaleProjectMarker(root, content string, vals map[string]string) (string, error) {
+	ready := vals[projectReadyKey]
+	if ready == "" || ready == vals["GCP_PROJECT_ID"] {
+		return content, nil
+	}
+	content = clearClientAndMarker(content)
+	if err := writeEnvAtomic(root, content); err != nil {
+		return "", err
+	}
+	vals["GOOGLE_OAUTH_CLIENT_ID"] = ""
+	vals["GOOGLE_OAUTH_CLIENT_SECRET"] = ""
+	vals[projectReadyKey] = ""
+	fmt.Fprintln(noticeWriter(), staleMarkerCleared)
+	return content, nil
+}
+
+func writeBootstrapSuccess(root, path string) error {
+	content, vals, err := readEnvContent(path)
+	if err != nil {
+		return err
+	}
+	content = upsertEnvKey(content, projectReadyKey, vals["GCP_PROJECT_ID"])
+	content = upsertEnvKey(content, bootstrapFailedKey, "")
+	return writeEnvAtomic(root, content)
+}
+
+func writeBootstrapFailure(root, path string) error {
+	content, _, err := readEnvContent(path)
+	if err != nil {
+		return err
+	}
+	content = upsertEnvKey(content, bootstrapFailedKey, "1")
+	return writeEnvAtomic(root, content)
+}
+
+func ensureBootstrapFailed(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "docs-cli: bootstrap failed:") {
+		return err
+	}
+	return fmt.Errorf("docs-cli: bootstrap failed: %w", err)
 }
 
 func wizardValueOK(key, value string) bool {
@@ -235,7 +416,7 @@ func forbiddenValue(key, value string) (string, error, bool) {
 func promptFor(key, current string) string {
 	switch key {
 	case "GCP_PROJECT_ID":
-		return "GCP_PROJECT_ID [" + current + "]（直接按 Enter 保留；改掉會使已建立的 OAuth client 失效）:"
+		return "GCP_PROJECT_ID [" + current + "]（直接按 Enter 保留；改掉會清掉 client id、secret 與專案就緒標記，Desktop client 留在舊專案）:"
 	case "GCP_PROJECT_NAME":
 		return "GCP_PROJECT_NAME [" + current + "]（直接按 Enter 保留預設）:"
 	case "GOOGLE_OAUTH_SUPPORT_EMAIL":

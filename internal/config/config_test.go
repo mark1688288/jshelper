@@ -659,6 +659,47 @@ func writeMode(t *testing.T, path, content string, mode os.FileMode) {
 	}
 }
 
+func TestLoadIgnoresProjectReadyMarker(t *testing.T) {
+	t.Setenv("APP_ENV", "staging")
+	dir := t.TempDir()
+	writeMode(t, filepath.Join(dir, ".env.example"), validEnv(), 0o644)
+	if _, err := Load(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, extra := range []string{
+		"DOCS_CLI_PROJECT_READY=other-project\n",
+		"DOCS_CLI_PROJECT_READY=\n",
+		"DOCS_CLI_BOOTSTRAP_FAILED=1\n",
+	} {
+		writeMode(t, filepath.Join(dir, ".env.example"), validEnv()+extra, 0o644)
+		cfg, err := Load(dir, nil)
+		if err != nil {
+			t.Fatalf("extra %q: %v", extra, err)
+		}
+		if cfg.ProjectID != "docs-cli-dev" {
+			t.Fatalf("project=%s", cfg.ProjectID)
+		}
+	}
+}
+
+func TestCommittedExampleStaysBlank(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), ".env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if strings.Contains(text, "DOCS_CLI_PROJECT_READY") || strings.Contains(text, "DOCS_CLI_BOOTSTRAP_FAILED") {
+		t.Fatalf("example contains a wizard marker:\n%s", text)
+	}
+	vals, err := parseEnv(".env.example", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vals["GOOGLE_OAUTH_CLIENT_ID"] != "" || vals["GOOGLE_OAUTH_CLIENT_SECRET"] != "" || vals["GOOGLE_DRIVE_FOLDER_ID"] != "" {
+		t.Fatalf("client=%q secret=%q folder=%q", vals["GOOGLE_OAUTH_CLIENT_ID"], vals["GOOGLE_OAUTH_CLIENT_SECRET"], vals["GOOGLE_DRIVE_FOLDER_ID"])
+	}
+}
+
 func filePerm(t *testing.T, path string) os.FileMode {
 	t.Helper()
 	info, err := os.Stat(path)
