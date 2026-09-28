@@ -133,6 +133,8 @@ func unquoteEnv(val string) string {
 	return val
 }
 
+// validate ignores DOCS_CLI_PROJECT_READY and DOCS_CLI_BOOTSTRAP_FAILED.
+// Those keys are wizard bookkeeping and are not Config fields.
 func validate(root, path, mode string, vals map[string]string) (*Config, error) {
 	projectID, err := nonEmpty(vals, "GCP_PROJECT_ID")
 	if err != nil {
