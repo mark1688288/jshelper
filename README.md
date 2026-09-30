@@ -13,6 +13,65 @@ Do not commit `.env`, `credentials.json`, `token.json`, `/design`, an OAuth clie
 
 The consent screen authorizes this app to see, edit, create, and delete all of your Google Drive files. The program only reads the one folder you name and creates one document there.
 
+## Prerequisites
+
+- Go 1.27.1
+- Google Cloud CLI (`gcloud`), logged in
+- A Google account for the support email and the Testing test user
+- An existing Google Drive folder; `create` needs `GOOGLE_DRIVE_FOLDER_ID`
+- macOS Keychain for the refresh token; the first `auth` may prompt
+
+## Quick Start
+
+From the repository root, the directory that contains `.env.example`. Do not export `APP_ENV`.
+
+```bash
+go build -o docs-cli -ldflags "-X github.com/mark1688288/jshelper/internal/config.defaultAppEnv=production" ./cmd/docs-cli
+```
+
+```bash
+./docs-cli setup
+```
+
+The first round copies `.env` when it is missing, asks `GCP_PROJECT_ID`, `GCP_PROJECT_NAME`, `GOOGLE_OAUTH_SUPPORT_EMAIL`, `GOOGLE_OAUTH_TEST_USER`, and `GOOGLE_DRIVE_FOLDER_ID`, creates the Cloud project when it is missing, and enables the Docs and Drive APIs.
+
+In that same project, finish these Console pages by hand. Create a Desktop client. Leave Web and IAP clients unused.
+
+- Branding: `https://console.cloud.google.com/auth/branding?project=<GCP_PROJECT_ID>`
+- Audience: External, Testing, and your test user. `https://console.cloud.google.com/auth/audience?project=<GCP_PROJECT_ID>`
+- Data Access: add only `https://www.googleapis.com/auth/drive`. `https://console.cloud.google.com/auth/scopes?project=<GCP_PROJECT_ID>`
+- Clients: Desktop app named `Docs CLI Desktop`. `https://console.cloud.google.com/auth/clients?project=<GCP_PROJECT_ID>`
+
+> [!NOTICE]
+> Stay in Testing unless you are in a Google Workspace and can complete Google verification for this app.
+
+```bash
+./docs-cli setup
+./docs-cli auth
+```
+
+The second `setup` asks for the client id and secret. `auth` stores the refresh token in the keyring. Sign in as the listed test user. The consent screen stays in Testing; an unlisted account gets `403: access_denied`.
+
+```bash
+./docs-cli create --title "Demo" --text "hello"
+```
+
+## Security
+
+The OAuth consent screen stays in Testing. Google expires that refresh token after about 7 days. When `create` fails with `invalid_grant`, run:
+
+```bash
+./docs-cli auth
+```
+
+The program does not open a browser on its own. A successful `auth` overwrites the stored token.
+
+`docs-cli` stores the refresh token with [zalando/go-keyring](https://github.com/zalando/go-keyring) as Keychain item `docs-cli` / `refresh-token`. The payload is JSON with `refresh_token` and `scope`. Access tokens stay in memory. The refresh token is not a file in the project directory, so it is not committed.
+
+That keyring item is the user grant. `credentials.json` is a different file: the Google installed Desktop client (`client_id`, `client_secret`, token URLs), derived from `.env`. Token exchange and refresh read the client id and secret from the env file. `setup`, `auth`, and `create` rewrite `credentials.json` (mode `0600`) as that installed-app copy. It is gitignored. The client secret stays in `.env` and `credentials.json`; it does not go in the keyring.
+
+On macOS, go-keyring writes to Keychain. Keychain encrypts the item at rest and unlocks it with your login. The first `auth` may ask for permission. The application does not add its own encryption.
+
 ## Build
 
 `go run` and `go test` stay in development. They read `.env.example` and do not copy it or ask questions.
@@ -74,3 +133,9 @@ There is one Console order. The client id exists only after a Desktop client is 
    ```
 
 Production `./docs-cli create` and `./docs-cli auth` use the same state machine as `setup`. When `DOCS_CLI_PROJECT_READY` is not the current `GCP_PROJECT_ID` and the first-round values are already valid, those commands run bootstrap and then exit 1 with the Desktop app instruction. They do not listen. The client id and secret are asked only when `DOCS_CLI_PROJECT_READY` equals the current `GCP_PROJECT_ID`. The round that writes the marker does not start a listener. Use setup, the Console steps, setup again, then auth.
+
+## Credits
+
+Refresh tokens are stored with [zalando/go-keyring](https://github.com/zalando/go-keyring).
+
+https://github.com/zalando/go-keyring
