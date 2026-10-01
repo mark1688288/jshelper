@@ -1,20 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
 	"golang.org/x/term"
 
 	"github.com/mark1688288/jshelper/internal/config"
 	"github.com/mark1688288/jshelper/internal/docs"
+	"github.com/mark1688288/jshelper/internal/jobad"
 	"github.com/mark1688288/jshelper/internal/oauth"
 )
 
@@ -25,12 +30,19 @@ commands:
   create [--title TITLE] [--text TEXT] [--folder FOLDER]
   auth
   setup
+  parse --html PATH
+  gemini-key
 
 create:
   --title TITLE    document title; omitted means DOCS_DEFAULT_TITLE
   --text TEXT      document body; if omitted, read stdin when it is not a terminal;
                    if omitted and stdin is a terminal, the body is empty
   --folder FOLDER  Drive folder id or folder URL for this run; overrides GOOGLE_DRIVE_FOLDER_ID
+
+parse:
+  --html PATH      saved JobsDB HTML file
+
+gemini-key stores the Gemini API key in the keyring. The key is not a flag.
 
 Run from the repository root, the directory that contains .env.example.
 The release binary defaults to production. APP_ENV in the environment overrides it.
@@ -41,7 +53,23 @@ const (
 	errBodyTooBig  = "docs-cli: body exceeds 1 MiB (1048576 bytes)"
 	errNeedFolder  = "docs-cli: GOOGLE_DRIVE_FOLDER_ID is required"
 	errKeyringWarn = "docs-cli: warning: could not update keyring"
+
+	errHTMLTooLarge      = "docs-cli: html exceeds 2 MiB"
+	errJobAdDetails      = "docs-cli: jobAdDetails not found"
+	errGeminiKeyMissing  = "docs-cli: gemini api key is not in the keyring"
+	errGeminiKeyTerminal = "docs-cli: gemini api key must be entered in a terminal"
+	errGeminiStored      = "docs-cli: stored gemini api key in keyring"
+	errGeminiRejected    = "docs-cli: gemini mapping rejected"
+
+	// geminiKeyPrompt is the ReadSecret prompt for gemini-key and for parse
+	// when the keyring item is missing. The typed key is not echoed.
+	geminiKeyPrompt = "Gemini API key（輸入時不顯示）:"
+
+	// maxHTMLBytes is 2 MiB. parse refuses a larger file before it builds a document.
+	maxHTMLBytes = 2 << 20 // 2097152
 )
+
+var errPageTooLarge = errors.New(errHTMLTooLarge)
 
 func main() {
 	os.Exit(run(os.Args[1:], realDeps()))
@@ -62,6 +90,9 @@ type deps struct {
 	WriteCredentials    func(*config.Config) error
 	Authorize           func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error)
 	CreateDocument      func(ctx context.Context, title, body, folderID string, insertIndex int64) (string, error)
+	// GeminiClient is the HTTP client for section mapping.
+	// Nil uses the default client inside MapSections. Tests pass a client that does not call Gemini.
+	GeminiClient *http.Client
 }
 
 func realDeps() deps {
@@ -87,6 +118,10 @@ func run(args []string, d deps) int {
 		return runAuth(args[1:], d)
 	case "setup":
 		return runSetup(args[1:], d)
+	case "parse":
+		return runParse(args[1:], d)
+	case "gemini-key":
+		return runGeminiKey(args[1:], d)
 	default:
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
@@ -396,6 +431,172 @@ func (d deps) createDocument(ctx context.Context, cfg *config.Config, tok *oauth
 		warn = true
 	}
 	return id, warn, err
+}
+
+func runParse(args []string, d deps) int {
+	fs := newFlagSet("parse", d.Stderr)
+	htmlFlag := fs.String("html", "", "saved JobsDB HTML file")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	htmlSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "html" {
+			htmlSet = true
+		}
+	})
+	if !htmlSet || *htmlFlag == "" {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+
+	page, err := readHTMLFile(*htmlFlag)
+	if errors.Is(err, errPageTooLarge) {
+		fmt.Fprintln(d.Stderr, errHTMLTooLarge)
+		return 1
+	}
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	doc, err := jobad.Parse(page)
+	if errors.Is(err, jobad.ErrJobAdDetailsNotFound) {
+		fmt.Fprintln(d.Stderr, errJobAdDetails)
+		return 1
+	}
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	doc.Source = *htmlFlag
+	doc = applyGemini(context.Background(), d, page, doc)
+	if err := writeDocument(d.Stdout, doc); err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	return 0
+}
+
+func readHTMLFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf, err := io.ReadAll(io.LimitReader(f, int64(maxHTMLBytes)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(buf) > maxHTMLBytes {
+		return nil, errPageTooLarge
+	}
+	return buf, nil
+}
+
+func applyGemini(ctx context.Context, d deps, page []byte, doc jobad.Document) jobad.Document {
+	_, err := jobad.LoadGeminiKey()
+	switch {
+	case errors.Is(err, keyring.ErrNotFound):
+		tty, closeTTY := terminalOrNil(d)
+		defer closeTTY()
+		if tty == nil {
+			fmt.Fprintln(d.Stderr, errGeminiKeyMissing)
+			return doc
+		}
+		secret, rerr := tty.ReadSecret(geminiKeyPrompt)
+		if rerr != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", rerr.Error())
+			return doc
+		}
+		if secret == "" {
+			fmt.Fprintln(d.Stderr, errGeminiKeyMissing)
+			return doc
+		}
+		if serr := jobad.StoreGeminiKey(secret); serr != nil {
+			fmt.Fprintln(d.Stderr, serr.Error())
+			return doc
+		}
+		fmt.Fprintln(d.Stderr, errGeminiStored)
+	case err != nil:
+		fmt.Fprintln(d.Stderr, err.Error())
+		return doc
+	}
+
+	blocks, err := jobad.CollectBlocks(page)
+	if err != nil {
+		fmt.Fprintln(d.Stderr, errGeminiRejected)
+		return doc
+	}
+	mapped, err := d.mapSections(ctx, doc, blocks)
+	if err != nil {
+		if errors.Is(err, keyring.ErrNotFound) {
+			fmt.Fprintln(d.Stderr, errGeminiKeyMissing)
+		} else {
+			fmt.Fprintln(d.Stderr, err.Error())
+		}
+		return doc
+	}
+	return mapped
+}
+
+func runGeminiKey(args []string, d deps) int {
+	fs := newFlagSet("gemini-key", d.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	tty, closeTTY := terminalOrNil(d)
+	defer closeTTY()
+	if tty == nil {
+		fmt.Fprintln(d.Stderr, errGeminiKeyTerminal)
+		return 1
+	}
+	secret, err := tty.ReadSecret(geminiKeyPrompt)
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	if secret == "" {
+		return 0
+	}
+	if err := jobad.StoreGeminiKey(secret); err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	fmt.Fprintln(d.Stderr, errGeminiStored)
+	return 0
+}
+
+func writeDocument(w io.Writer, doc jobad.Document) error {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(doc); err != nil {
+		return err
+	}
+	_, err := w.Write(buf.Bytes())
+	return err
+}
+
+func (d deps) mapSections(ctx context.Context, doc jobad.Document, blocks []jobad.Block) (jobad.Document, error) {
+	return jobad.MapSections(ctx, doc, blocks, d.GeminiClient)
+}
+
+func terminalOrNil(d deps) (config.TTY, func()) {
+	tty, closeTTY := openCommandTTY(d)
+	if tty == nil || !tty.IsTerminal() {
+		closeTTY()
+		return nil, func() {}
+	}
+	return tty, closeTTY
 }
 
 func commandRoot(d deps) (string, error) {
