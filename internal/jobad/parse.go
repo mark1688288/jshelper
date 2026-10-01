@@ -5,6 +5,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/net/html"
 )
@@ -35,15 +36,12 @@ const (
 	sectionDuties       = "duties"
 	sectionRequirements = "requirements"
 	sectionTrailer      = "trailer"
+	// sectionGap is walk state only. Items collected there are stored in trailer.
+	sectionGap = "gap"
+	// maxHeadingRunes is the longest normalized strong that still opens a gap.
+	// Longer text that matches no phrase, including the salary warning, is not a heading.
+	maxHeadingRunes = 80
 )
-
-// Known headings switch section. Other strong text, including the salary
-// warning, is not a heading and is not copied into a list.
-var headings = map[string]string{
-	"What do we offer?": sectionOffer,
-	"Job Description":   sectionDuties,
-	"Job Requirement":   sectionRequirements,
-}
 
 // Local part is either an ordinary mailbox or a mask of bullets, stars, or dots.
 var emailRE = regexp.MustCompile(`(?i)(?:[A-Za-z0-9._%+\-]+|[•*.]{2,})@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
@@ -89,31 +87,128 @@ func walk(n *html.Node, section string, doc *Document) string {
 		case "script", "style", "svg":
 			return section
 		case "strong":
-			if next, ok := headings[textOf(n)]; ok {
+			// A strong inside an li never reaches here; li returns first.
+			if next, ok := strongSection(textOf(n)); ok {
 				return next
 			}
+			return section
 		case "li":
-			if section == sectionOffer || section == sectionDuties || section == sectionRequirements {
+			switch section {
+			case sectionOffer, sectionDuties, sectionRequirements:
 				add(doc, section, textOf(n))
-				return section
-			}
-		case "p":
-			if section == sectionRequirements {
-				if hasHeading(n) {
-					for c := n.FirstChild; c != nil; c = c.NextSibling {
-						section = walk(c, section, doc)
-					}
-					return section
-				}
+			case sectionGap:
 				add(doc, sectionTrailer, textOf(n))
-				return section
 			}
+			return section
+		case "p":
+			return walkP(n, section, doc)
 		}
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		section = walk(c, section, doc)
 	}
 	return section
+}
+
+func walkP(n *html.Node, section string, doc *Document) string {
+	norm := normalizeHeading(textOf(n))
+	if utf8.RuneCountInString(norm) <= maxHeadingRunes {
+		if kind, ok := classify(norm); ok {
+			return kind
+		}
+	}
+	if containsHeading(n) {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			section = walk(c, section, doc)
+		}
+		return section
+	}
+	if section == sectionRequirements || section == sectionGap {
+		add(doc, sectionTrailer, textOf(n))
+		return section
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		section = walk(c, section, doc)
+	}
+	return section
+}
+
+// strongSection classifies a strong, or opens a gap when the normalized
+// text is 1 to maxHeadingRunes and matches no phrase.
+func strongSection(text string) (string, bool) {
+	norm := normalizeHeading(text)
+	if kind, ok := classify(norm); ok {
+		return kind, true
+	}
+	if n := utf8.RuneCountInString(norm); n >= 1 && n <= maxHeadingRunes {
+		return sectionGap, true
+	}
+	return "", false
+}
+
+func containsHeading(n *html.Node) bool {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type != html.ElementNode {
+			continue
+		}
+		switch c.Data {
+		case "script", "style", "svg", "li":
+			continue
+		case "strong":
+			if _, ok := strongSection(textOf(c)); ok {
+				return true
+			}
+		}
+		if containsHeading(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// classify expects normalizeHeading output. Offer, then duties, then requirements.
+func classify(norm string) (string, bool) {
+	switch norm {
+	case "what do we offer", "what we offer", "what you'll get", "what you will get":
+		return sectionOffer, true
+	case "job description", "what you'll do", "what you will do", "responsibilities",
+		"your responsibilities", "about the role", "the role", "工作內容", "職責":
+		return sectionDuties, true
+	case "requirement", "requirements", "job requirement", "job requirements",
+		"qualifications", "qualification", "who you are", "about you":
+		return sectionRequirements, true
+	}
+	for _, phrase := range []string{
+		"good fit",
+		"if you have",
+		"if you are",
+		"you'll need",
+		"you will need",
+		"what you'll bring",
+		"what you will bring",
+		"looking for",
+		"職位要求",
+		"入職要求",
+	} {
+		if strings.Contains(norm, phrase) {
+			return sectionRequirements, true
+		}
+	}
+	return "", false
+}
+
+// normalizeHeading collapses whitespace, drops one trailing colon or question mark, then lowercases.
+func normalizeHeading(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+	rs := []rune(s)
+	switch rs[len(rs)-1] {
+	case ':', '：', '?', '？':
+		s = strings.TrimSpace(string(rs[:len(rs)-1]))
+	}
+	return strings.ToLower(s)
 }
 
 func add(doc *Document, section, text string) {
@@ -131,25 +226,6 @@ func add(doc *Document, section, text string) {
 	case sectionTrailer:
 		doc.Trailer = append(doc.Trailer, text)
 	}
-}
-
-func hasHeading(n *html.Node) bool {
-	if n.Type == html.ElementNode {
-		switch n.Data {
-		case "script", "style", "svg":
-			return false
-		case "strong":
-			if _, ok := headings[textOf(n)]; ok {
-				return true
-			}
-		}
-	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if hasHeading(c) {
-			return true
-		}
-	}
-	return false
 }
 
 func findAutomation(n *html.Node, name string) *html.Node {
