@@ -134,6 +134,22 @@ There is one Console order. The client id exists only after a Desktop client is 
 
 Production `./docs-cli create` and `./docs-cli auth` use the same state machine as `setup`. When `DOCS_CLI_PROJECT_READY` is not the current `GCP_PROJECT_ID` and the first-round values are already valid, those commands run bootstrap and then exit 1 with the Desktop app instruction. They do not listen. The client id and secret are asked only when `DOCS_CLI_PROJECT_READY` equals the current `GCP_PROJECT_ID`. The round that writes the marker does not start a listener. Use setup, the Console steps, setup again, then auth.
 
+## Job ads
+
+`parse` reads a saved JobsDB HTML file and writes section JSON to stdout. It does not read `.env` and it does not use the refresh token.
+
+```bash
+docs-cli parse --html PATH
+```
+
+`gemini-key` stores a Gemini API key in the keyring item `docs-cli` / `gemini-api-key`. The key is typed at the terminal and is not echoed. It is not a flag, not an environment variable, and it is not written to `.env` or `credentials.json`. `create`, `auth`, and `setup` do not read or write that item.
+
+```bash
+docs-cli gemini-key
+```
+
+On a terminal, `parse` asks for the key when that item is missing, then stores it. Without a key, `parse` keeps the local heading classification and does not call Gemini. When a key is stored, `parse` sends only the extracted plain text, with email addresses removed. It does not send the HTML page. `go test` does not call Gemini.
+
 ## Credits
 
 Refresh tokens are stored with [zalando/go-keyring](https://github.com/zalando/go-keyring).
