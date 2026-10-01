@@ -112,6 +112,66 @@ func TestParseOmitsSalaryWarning(t *testing.T) {
 	}
 }
 
+func TestParseFriendlyHeadings(t *testing.T) {
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>You'll be a good fit if you have/are:</strong></p>
+		<ul><li>Have shipped Go services</li></ul>
+		<p><strong>You'll be a good fit if you are:</strong></p>
+		<ul><li>Based in Hong Kong</li></ul>
+		<p><strong>Job Requirements</strong></p>
+		<ul><li>Degree in Computer Science</li></ul>
+		<p>What you'll do:</p>
+		<ul><li>Design the API</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Requirements, "|"), "Have shipped Go services|Based in Hong Kong|Degree in Computer Science"; got != want {
+		t.Fatalf("requirements = %q", got)
+	}
+	if got, want := strings.Join(doc.Duties, "|"), "Design the API"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if len(doc.Offer) != 0 || len(doc.Trailer) != 0 {
+		t.Fatalf("offer = %#v trailer = %#v", doc.Offer, doc.Trailer)
+	}
+}
+
+func TestParseShortHeadingCutsToTrailer(t *testing.T) {
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>Job Description</strong></p>
+		<ul><li>Write design notes</li></ul>
+		<p><strong>Team culture:</strong></p>
+		<ul><li>We share context openly</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Duties, "|"), "Write design notes"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if got, want := strings.Join(doc.Trailer, "|"), "We share context openly"; got != want {
+		t.Fatalf("trailer = %q", got)
+	}
+	if len(doc.Requirements) != 0 {
+		t.Fatalf("requirements = %#v", doc.Requirements)
+	}
+}
+
+func TestParseLongSalaryWarningIsNotAHeading(t *testing.T) {
+	const warning = "Applications submitted without expected salary in resume may be excluded from consideration."
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>Job Description</strong></p>
+		<ul><li>Write design notes</li></ul>
+		<p><strong>`+warning+`</strong></p>
+		<ul><li>Five years of relevant experience</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Duties, "|"), "Write design notes|Five years of relevant experience"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if len(doc.Requirements) != 0 {
+		t.Fatalf("requirements = %#v", doc.Requirements)
+	}
+	blob := strings.Join(append(append(append(doc.Offer, doc.Duties...), doc.Requirements...), doc.Trailer...), "\n")
+	if strings.Contains(blob, warning) {
+		t.Fatalf("salary warning was kept: %s", blob)
+	}
+}
+
 func TestParseMissingJobAdDetails(t *testing.T) {
 	_, err := Parse([]byte(`<span data-automation="job-detail-title">Title</span>`))
 	if !errors.Is(err, ErrJobAdDetailsNotFound) {
@@ -120,6 +180,15 @@ func TestParseMissingJobAdDetails(t *testing.T) {
 	if err.Error() != "jobad: jobAdDetails not found" {
 		t.Fatalf("err text = %q", err.Error())
 	}
+}
+
+func parseHTML(t *testing.T, page string) Document {
+	t.Helper()
+	doc, err := Parse([]byte(page))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
 }
 
 func parseFixture(t *testing.T) Document {
