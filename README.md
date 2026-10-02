@@ -15,11 +15,16 @@ The consent screen authorizes this app to see, edit, create, and delete all of y
 
 ## Prerequisites
 
+- macOS 27 or later
+- Apple silicon, M1 or later
 - Go 1.27.1
 - Google Cloud CLI (`gcloud`), logged in
 - A Google account for the support email and the Testing test user
 - An existing Google Drive folder; `create` needs `GOOGLE_DRIVE_FOLDER_ID`
 - macOS Keychain for the refresh token; the first `auth` may prompt
+- `fm` (`/usr/bin/fm`), with Apple Intelligence turned on
+
+The full name of `fm` is the Apple Foundation Models command-line interface. It is preinstalled at `/usr/bin/fm` with macOS 27. Apple Foundation Models is the on-device language model behind Apple Intelligence, on a Mac with M1 or later.
 
 ## Quick Start
 
@@ -149,6 +154,14 @@ docs-cli gemini-key
 ```
 
 On a terminal, `parse` asks for the key when that item is missing, then stores it. Without a key, `parse` keeps the local heading classification and does not call Gemini. When a key is stored, `parse` sends only the extracted plain text, with email addresses removed. It does not send the HTML page. `go test` does not call Gemini.
+
+`analyze` reads that section JSON and writes the requirement JSON to stdout. It needs macOS, Apple Intelligence, and `/usr/bin/fm`. A privileged user must already have run `sudo fm license` on that Mac. It does not read `.env` and it does not read the Gemini API key. `go test` does not run `/usr/bin/fm` and does not call Gemini.
+
+```bash
+docs-cli analyze --json PATH
+```
+
+An empty requirements list exits 1 with `docs-cli: requirements is empty` and does not run `fm`.
 
 ## Credits
 
