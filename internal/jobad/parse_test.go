@@ -134,6 +134,65 @@ func TestParseFriendlyHeadings(t *testing.T) {
 	}
 }
 
+func TestParseKeyResponsibilitiesAreDuties(t *testing.T) {
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>Key Responsibilities</strong></p>
+		<ul><li>Own the service</li></ul>
+		<p><strong>Key Responsibilities:</strong></p>
+		<ul><li>Review pull requests</li></ul>
+		<p><strong>Job Responsibilities</strong></p>
+		<ul><li>Write the runbook</li></ul>
+		<p><strong>Roles and Responsibilities</strong></p>
+		<ul><li>Pair with product</li></ul>
+		<p><strong>Team culture:</strong></p>
+		<ul><li>We share context openly</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Duties, "|"), "Own the service|Review pull requests|Write the runbook|Pair with product"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if got, want := strings.Join(doc.Trailer, "|"), "We share context openly"; got != want {
+		t.Fatalf("trailer = %q", got)
+	}
+	if len(doc.Offer) != 0 || len(doc.Requirements) != 0 {
+		t.Fatalf("offer = %#v requirements = %#v", doc.Offer, doc.Requirements)
+	}
+}
+
+func TestParseResponsibilitiesLookalikesStayInTrailer(t *testing.T) {
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>Job Description</strong></p>
+		<ul><li>Write design notes</li></ul>
+		<p><strong>irresponsibilities</strong></p>
+		<ul><li>Stay in trailer</li></ul>
+		<p><strong>responsibility</strong></p>
+		<ul><li>Singular stays in trailer</li></ul>
+		<p><strong>主要職責</strong></p>
+		<ul><li>Chinese prefix stays in trailer</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Duties, "|"), "Write design notes"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if got, want := strings.Join(doc.Trailer, "|"), "Stay in trailer|Singular stays in trailer|Chinese prefix stays in trailer"; got != want {
+		t.Fatalf("trailer = %q", got)
+	}
+	if len(doc.Requirements) != 0 {
+		t.Fatalf("requirements = %#v", doc.Requirements)
+	}
+}
+
+func TestParseResponsibilitiesBeforeRequirementsPhrase(t *testing.T) {
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>Key responsibilities if you have shipped</strong></p>
+		<ul><li>Own the service</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Duties, "|"), "Own the service"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if len(doc.Requirements) != 0 || len(doc.Trailer) != 0 {
+		t.Fatalf("requirements = %#v trailer = %#v", doc.Requirements, doc.Trailer)
+	}
+}
+
 func TestParseShortHeadingCutsToTrailer(t *testing.T) {
 	doc := parseHTML(t, `<div data-automation="jobAdDetails">
 		<p><strong>Job Description</strong></p>

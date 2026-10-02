@@ -166,7 +166,10 @@ func containsHeading(n *html.Node) bool {
 	return false
 }
 
-// classify expects normalizeHeading output. Offer, then duties, then requirements.
+// classify expects normalizeHeading output. Offer exact, then duties, then requirements.
+// Duties is an exact phrase, or any strings.Fields token equal to responsibilities.
+// That token is a whole word, so irresponsibilities and responsibility do not match.
+// It is checked before requirements phrases, so both in one heading stay duties.
 func classify(norm string) (string, bool) {
 	switch norm {
 	case "what do we offer", "what we offer", "what you'll get", "what you will get":
@@ -174,6 +177,13 @@ func classify(norm string) (string, bool) {
 	case "job description", "what you'll do", "what you will do", "responsibilities",
 		"your responsibilities", "about the role", "the role", "工作內容", "職責":
 		return sectionDuties, true
+	}
+	for _, word := range strings.Fields(norm) {
+		if word == "responsibilities" {
+			return sectionDuties, true
+		}
+	}
+	switch norm {
 	case "requirement", "requirements", "job requirement", "job requirements",
 		"qualifications", "qualification", "who you are", "about you":
 		return sectionRequirements, true
