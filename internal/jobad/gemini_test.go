@@ -18,7 +18,11 @@ import (
 
 func TestMain(m *testing.M) {
 	keyring.MockInit()
+	SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+		return nil, []byte("fm exec not stubbed"), 1
+	})
 	code := m.Run()
+	SetFMExecForTest(nil)
 	keyring.MockRestore()
 	os.Exit(code)
 }

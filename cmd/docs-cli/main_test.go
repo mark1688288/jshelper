@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,7 +30,11 @@ func TestMain(m *testing.M) {
 		return errors.New("docs-cli: bootstrap not stubbed")
 	})
 	keyring.MockInit()
+	jobad.SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+		return nil, []byte("fm exec not stubbed"), 1
+	})
 	code := m.Run()
+	jobad.SetFMExecForTest(nil)
 	keyring.MockRestore()
 	os.Exit(code)
 }
@@ -1494,6 +1499,332 @@ func runParseArgs(t *testing.T, args []string, tty config.TTY) (string, string, 
 	forbidEnv(t, &d)
 	code := run(args, d)
 	return stdout.String(), stderr.String(), code
+}
+
+func TestAnalyzeCommandFakeFM(t *testing.T) {
+	keyring.MockInit()
+	const apiKey = "analyze-must-not-read-key"
+	if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobad.StoreGeminiKey(apiKey); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	doc := jobad.Document{
+		Source: "source-token-9f3a.html",
+		Header: jobad.Header{
+			TitleBlock:     "System Analyst",
+			Location:       "LOCATION-TOKEN",
+			WorkType:       "WORKTYPE-TOKEN",
+			Classification: "CLASS-TOKEN",
+		},
+		Offer:        []string{"Medical person@example.com"},
+		Duties:       []string{},
+		Requirements: []string{"Know Go", "React (For Frontend)"},
+		Trailer:      []string{"TRAILER-SENTINEL"},
+	}
+	path := writeJobJSON(t, doc)
+	text, err := jobad.PromptText(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"R&D","level":"must","applies_to":"For Frontend"}],"soft_skills":[]}`
+	var calls [][]string
+	scriptedFM(t, &calls,
+		fmStep{stdout: "not-analysis", stderr: "available noise"},
+		fmStep{stdout: model + "\n", stderr: "respond noise"},
+	)
+	var stdout, stderr bytes.Buffer
+	d := deps{
+		Stdin:        strings.NewReader(apiKey),
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+		Root:         dir,
+		Environ:      []string{"APP_ENV=production"},
+		GeminiClient: blockGemini(t),
+	}
+	forbidEnv(t, &d)
+	code := run([]string{"analyze", "--json", path}, d)
+	if code != 0 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr %q", stderr.String())
+	}
+	const want = `{
+  "must_have": [
+    "Know Go"
+  ],
+  "advantage": [],
+  "min_years": null,
+  "degree": null,
+  "languages": [],
+  "tech": [
+    {
+      "name": "R&D",
+      "level": "must",
+      "applies_to": "For Frontend"
+    }
+  ],
+  "soft_skills": []
+}
+`
+	if stdout.String() != want {
+		t.Fatalf("stdout =\n%s\nwant =\n%s", stdout.String(), want)
+	}
+	if strings.Contains(stdout.String(), `\u0026`) || !strings.Contains(stdout.String(), "R&D") {
+		t.Fatalf("stdout %s", stdout.String())
+	}
+	if len(calls) != 2 || !slices.Equal(calls[0], []string{"/usr/bin/fm", "available"}) {
+		t.Fatalf("available %#v", calls)
+	}
+	wantArgs := []string{
+		"/usr/bin/fm", "respond", "--no-stream", "--use-case", "general",
+		"--instructions", jobad.AnalysisInstructions,
+		"--schema", jobad.AnalysisSchema,
+		"--text", text,
+	}
+	if !slices.Equal(calls[1], wantArgs) {
+		t.Fatalf("respond %#v\nwant %#v", calls[1], wantArgs)
+	}
+	for _, arg := range calls[1] {
+		for _, banned := range []string{apiKey, "TRAILER-SENTINEL", "source-token-9f3a.html", "person@example.com", "LOCATION-TOKEN", "WORKTYPE-TOKEN", "CLASS-TOKEN"} {
+			if strings.Contains(arg, banned) {
+				t.Fatalf("argv contains %q\n%s", banned, arg)
+			}
+		}
+	}
+	assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+	assertRefreshUntouched(t)
+	raw, err := keyring.Get("docs-cli", "gemini-api-key")
+	if err != nil || raw != `{"api_key":"`+apiKey+`"}` {
+		t.Fatalf("gemini key %q err %v", raw, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temp dir has %d entries", len(entries))
+	}
+}
+
+func TestAnalyzeSkipsFMWhenRequirementsEmpty(t *testing.T) {
+	calls := 0
+	jobad.SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
+		calls++
+		t.Errorf("fm called %q", argv)
+		return nil, []byte("fm called"), 1
+	})
+	t.Cleanup(restoreFMStub)
+	docs := []jobad.Document{
+		{Requirements: []string{}, Offer: []string{"Medical"}, Trailer: []string{"TRAILER-SENTINEL"}},
+		{Requirements: []string{"person@example.com"}},
+		{},
+	}
+	for _, doc := range docs {
+		path := writeJobJSON(t, doc)
+		stdout, stderr, code := runAnalyzeArgs(t, path)
+		if code != 1 || stdout != "" || stderr != "docs-cli: requirements is empty\n" {
+			t.Fatalf("doc %#v exit %d stdout %q stderr %q", doc.Requirements, code, stdout, stderr)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("calls %d", calls)
+	}
+}
+
+func TestAnalyzeFMAvailableFails(t *testing.T) {
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+
+	t.Run("available", func(t *testing.T) {
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: `{"must_have":[]}`, stderr: "not licensed\n", code: 1})
+		stdout, stderr, code := runAnalyzeArgs(t, path)
+		if code != 1 || stdout != "" || stderr != "docs-cli: fm: not licensed\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(calls) != 1 || !slices.Equal(calls[0], []string{"/usr/bin/fm", "available"}) {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("respond", func(t *testing.T) {
+		var calls [][]string
+		scriptedFM(t, &calls,
+			fmStep{},
+			fmStep{stdout: `{"must_have":["Go"]}`, stderr: "guardrail rejected\n", code: 1},
+		)
+		stdout, stderr, code := runAnalyzeArgs(t, path)
+		if code != 1 || stdout != "" || stderr != "docs-cli: fm: guardrail rejected\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(calls) != 2 || calls[1][1] != "respond" {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+}
+
+func TestAnalyzeRejectsModelProse(t *testing.T) {
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	var calls [][]string
+	scriptedFM(t, &calls,
+		fmStep{},
+		fmStep{stdout: "The candidate needs Go.\n"},
+	)
+	stdout, stderr, code := runAnalyzeArgs(t, path)
+	if code != 1 || stdout != "" || stderr != "docs-cli: fm output is not the analysis schema\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if len(calls) != 2 || calls[1][1] != "respond" {
+		t.Fatalf("calls %#v", calls)
+	}
+}
+
+func TestAnalyzeUsage(t *testing.T) {
+	const leaked = "super-secret-gemini-key"
+	jobad.SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
+		t.Errorf("fm called %q", argv)
+		return nil, []byte("fm called"), 1
+	})
+	t.Cleanup(restoreFMStub)
+	tests := []struct {
+		name  string
+		args  []string
+		exact bool
+	}{
+		{name: "no flag", args: []string{"analyze"}},
+		{name: "missing value", args: []string{"analyze", "--json"}},
+		{name: "empty value", args: []string{"analyze", "--json", ""}},
+		{name: "unknown flag", args: []string{"analyze", "--bogus"}},
+		{name: "html flag", args: []string{"analyze", "--html", "page.html"}},
+		{name: "extra arg", args: []string{"analyze", "--json", "job.json", "extra"}},
+		{name: "help", args: []string{"analyze", "--help"}, exact: true},
+		{name: "short help", args: []string{"analyze", "-h"}, exact: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keyring.MockInit()
+			var stdout, stderr bytes.Buffer
+			code := run(tt.args, deps{
+				Stdin:  strings.NewReader(leaked),
+				Stdout: &stdout,
+				Stderr: &stderr,
+			})
+			if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "usage: docs-cli") {
+				t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+			}
+			if tt.exact && stderr.String() != usageText {
+				t.Fatalf("stderr %q", stderr.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), leaked) {
+				t.Fatal("leaked the key")
+			}
+			if _, err := keyring.Get("docs-cli", "gemini-api-key"); !errors.Is(err, keyring.ErrNotFound) {
+				t.Fatalf("keyring err %v", err)
+			}
+		})
+	}
+	if !strings.Contains(usageText, "\n  gemini-key\n  analyze --json PATH\n") {
+		t.Fatalf("usage commands:\n%s", usageText)
+	}
+}
+
+func TestAnalyzeJSONTooLarge(t *testing.T) {
+	jobad.SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
+		t.Errorf("fm called %q", argv)
+		return nil, []byte("fm called"), 1
+	})
+	t.Cleanup(restoreFMStub)
+
+	t.Run("over", func(t *testing.T) {
+		path := writeFile(t, "over.json", bytes.Repeat([]byte{'x'}, maxJSONBytes+1))
+		stdout, stderr, code := runAnalyzeArgs(t, path)
+		if code != 1 || stdout != "" || stderr != errJSONTooLarge+"\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+	})
+
+	t.Run("exact", func(t *testing.T) {
+		body := []byte(`{"requirements":[]}`)
+		padded := append(body, bytes.Repeat([]byte{' '}, maxJSONBytes-len(body))...)
+		path := writeFile(t, "exact.json", padded)
+		stdout, stderr, code := runAnalyzeArgs(t, path)
+		if code != 1 || stdout != "" || stderr != "docs-cli: requirements is empty\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+	})
+
+	t.Run("missing", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing.json")
+		stdout, stderr, code := runAnalyzeArgs(t, path)
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || strings.Contains(stderr, errJSONTooLarge) {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		path := writeFile(t, "bad.json", []byte(`{"requirements":`))
+		stdout, stderr, code := runAnalyzeArgs(t, path)
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || strings.Contains(stderr, errJSONTooLarge) {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+	})
+}
+
+func runAnalyzeArgs(t *testing.T, path string) (string, string, int) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	d := deps{
+		Stdin:        strings.NewReader(""),
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+		Root:         t.TempDir(),
+		Environ:      []string{"APP_ENV=production"},
+		GeminiClient: blockGemini(t),
+	}
+	forbidEnv(t, &d)
+	code := run([]string{"analyze", "--json", path}, d)
+	return stdout.String(), stderr.String(), code
+}
+
+type fmStep struct {
+	stdout string
+	stderr string
+	code   int
+}
+
+func scriptedFM(t *testing.T, calls *[][]string, steps ...fmStep) {
+	t.Helper()
+	n := 0
+	jobad.SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
+		*calls = append(*calls, append([]string(nil), argv...))
+		if n >= len(steps) {
+			t.Errorf("extra fm call %q", argv)
+			return nil, []byte("extra fm call"), 1
+		}
+		step := steps[n]
+		n++
+		return []byte(step.stdout), []byte(step.stderr), step.code
+	})
+	t.Cleanup(restoreFMStub)
+}
+
+func restoreFMStub() {
+	jobad.SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+		return nil, []byte("fm exec not stubbed"), 1
+	})
+}
+
+func writeJobJSON(t *testing.T, doc jobad.Document) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := writeIndentedJSON(&buf, doc); err != nil {
+		t.Fatal(err)
+	}
+	return writeFile(t, "job.json", buf.Bytes())
 }
 
 func forbidEnv(t *testing.T, d *deps) {

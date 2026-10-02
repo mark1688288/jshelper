@@ -32,6 +32,7 @@ commands:
   setup
   parse --html PATH
   gemini-key
+  analyze --json PATH
 
 create:
   --title TITLE    document title; omitted means DOCS_DEFAULT_TITLE
@@ -44,6 +45,9 @@ parse:
 
 gemini-key stores the Gemini API key in the keyring. The key is not a flag.
 
+analyze:
+  --json PATH      section JSON from parse
+
 Run from the repository root, the directory that contains .env.example.
 The release binary defaults to production. APP_ENV in the environment overrides it.
 `
@@ -55,6 +59,7 @@ const (
 	errKeyringWarn = "docs-cli: warning: could not update keyring"
 
 	errHTMLTooLarge      = "docs-cli: html exceeds 2 MiB"
+	errJSONTooLarge      = "docs-cli: json exceeds 1 MiB"
 	errJobAdDetails      = "docs-cli: jobAdDetails not found"
 	errGeminiKeyMissing  = "docs-cli: gemini api key is not in the keyring"
 	errGeminiKeyTerminal = "docs-cli: gemini api key must be entered in a terminal"
@@ -67,9 +72,12 @@ const (
 
 	// maxHTMLBytes is 2 MiB. parse refuses a larger file before it builds a document.
 	maxHTMLBytes = 2 << 20 // 2097152
+	// maxJSONBytes is 1 MiB. analyze refuses a larger file before it calls fm.
+	maxJSONBytes = 1 << 20 // 1048576
 )
 
 var errPageTooLarge = errors.New(errHTMLTooLarge)
+var errJSONTooBig = errors.New(errJSONTooLarge)
 
 func main() {
 	os.Exit(run(os.Args[1:], realDeps()))
@@ -122,6 +130,8 @@ func run(args []string, d deps) int {
 		return runParse(args[1:], d)
 	case "gemini-key":
 		return runGeminiKey(args[1:], d)
+	case "analyze":
+		return runAnalyze(args[1:], d)
 	default:
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
@@ -574,12 +584,79 @@ func runGeminiKey(args []string, d deps) int {
 	return 0
 }
 
+func runAnalyze(args []string, d deps) int {
+	fs := newFlagSet("analyze", d.Stderr)
+	jsonFlag := fs.String("json", "", "section JSON from parse")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	jsonSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "json" {
+			jsonSet = true
+		}
+	})
+	if !jsonSet || *jsonFlag == "" {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+
+	raw, err := readLimitedFile(*jsonFlag, maxJSONBytes)
+	if errors.Is(err, errJSONTooBig) {
+		fmt.Fprintln(d.Stderr, errJSONTooLarge)
+		return 1
+	}
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	var doc jobad.Document
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	analysis, err := jobad.Analyze(doc)
+	if err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	if err := writeIndentedJSON(d.Stdout, analysis); err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	return 0
+}
+
+func readLimitedFile(path string, limit int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(buf) > limit {
+		return nil, errJSONTooBig
+	}
+	return buf, nil
+}
+
 func writeDocument(w io.Writer, doc jobad.Document) error {
+	return writeIndentedJSON(w, doc)
+}
+
+func writeIndentedJSON(w io.Writer, v any) error {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(doc); err != nil {
+	if err := enc.Encode(v); err != nil {
 		return err
 	}
 	_, err := w.Write(buf.Bytes())
