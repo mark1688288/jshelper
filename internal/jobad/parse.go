@@ -38,9 +38,12 @@ const (
 	sectionTrailer      = "trailer"
 	// sectionGap is walk state only. Items collected there are stored in trailer.
 	sectionGap = "gap"
-	// maxHeadingRunes is the longest normalized strong that still opens a gap.
-	// Longer text that matches no phrase, including the salary warning, is not a heading.
+	// maxHeadingRunes is the longest normalized paragraph that can still be a heading.
+	// Block collection uses the same ceiling. The salary warning is longer and is not a heading.
 	maxHeadingRunes = 80
+	// maxGapRunes is the longest normalized unclassified strong that opens a gap.
+	// A strong of 41 runes through maxHeadingRunes that matches no phrase stays in the current section.
+	maxGapRunes = 40
 )
 
 // Local part is either an ordinary mailbox or a mask of bullets, stars, or dots.
@@ -88,7 +91,7 @@ func walk(n *html.Node, section string, doc *Document) string {
 			return section
 		case "strong":
 			// A strong inside an li never reaches here; li returns first.
-			if next, ok := strongSection(textOf(n)); ok {
+			if next, ok := sectionStrong(textOf(n)); ok {
 				return next
 			}
 			return section
@@ -117,7 +120,7 @@ func walkP(n *html.Node, section string, doc *Document) string {
 			return kind
 		}
 	}
-	if containsHeading(n) {
+	if containsSectionStrong(n) {
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			section = walk(c, section, doc)
 		}
@@ -133,20 +136,38 @@ func walkP(n *html.Node, section string, doc *Document) string {
 	return section
 }
 
-// strongSection classifies a strong, or opens a gap when the normalized
-// text is 1 to maxHeadingRunes and matches no phrase.
+// sectionStrong classifies a strong for Parse, or opens a gap when the
+// normalized text is 1 to maxGapRunes and matches no phrase.
+func sectionStrong(text string) (string, bool) {
+	return strongWithin(text, maxGapRunes)
+}
+
+// strongSection classifies a strong for block collection, or opens a gap when
+// the normalized text is 1 to maxHeadingRunes and matches no phrase.
 func strongSection(text string) (string, bool) {
+	return strongWithin(text, maxHeadingRunes)
+}
+
+func strongWithin(text string, gapRunes int) (string, bool) {
 	norm := normalizeHeading(text)
 	if kind, ok := classify(norm); ok {
 		return kind, true
 	}
-	if n := utf8.RuneCountInString(norm); n >= 1 && n <= maxHeadingRunes {
+	if n := utf8.RuneCountInString(norm); n >= 1 && n <= gapRunes {
 		return sectionGap, true
 	}
 	return "", false
 }
 
+func containsSectionStrong(n *html.Node) bool {
+	return containsStrongWithin(n, maxGapRunes)
+}
+
 func containsHeading(n *html.Node) bool {
+	return containsStrongWithin(n, maxHeadingRunes)
+}
+
+func containsStrongWithin(n *html.Node, gapRunes int) bool {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		if c.Type != html.ElementNode {
 			continue
@@ -155,11 +176,11 @@ func containsHeading(n *html.Node) bool {
 		case "script", "style", "svg", "li":
 			continue
 		case "strong":
-			if _, ok := strongSection(textOf(c)); ok {
+			if _, ok := strongWithin(textOf(c), gapRunes); ok {
 				return true
 			}
 		}
-		if containsHeading(c) {
+		if containsStrongWithin(c, gapRunes) {
 			return true
 		}
 	}
