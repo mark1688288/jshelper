@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,20 +23,36 @@ const (
 	geminiAccount  = "gemini-api-key"
 
 	// geminiModel is the stable Gemini Flash id in the Gemini API models guide.
-	geminiModel = "gemini-3.8-flash"
+	geminiModel = "gemini-3.7-flash"
 	geminiURL   = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel + ":generateContent"
 
-	geminiTimeout     = 60 * time.Second
-	maxKeyringBytes   = 4096
-	maxGeminiResponse = 1 << 20
+	geminiTimeout        = 60 * time.Second
+	maxKeyringBytes      = 4096
+	maxGeminiResponse    = 1 << 20
+	maxRejectRunes       = 120
+	maxGeminiErrorBody   = 8192
+	maxStatusDetailRunes = 240
 )
 
 var (
-	errKeyringUnavailable    = errors.New("docs-cli: keyring unavailable")
-	errGeminiKeyInvalid      = errors.New("docs-cli: keyring item is invalid; run docs-cli gemini-key")
-	errKeyringItemTooBig     = errors.New("docs-cli: keyring item exceeds the 4096 byte command limit")
-	errGeminiMappingRejected = errors.New("docs-cli: gemini mapping rejected")
+	errKeyringUnavailable = errors.New("docs-cli: keyring unavailable")
+	errGeminiKeyInvalid   = errors.New("docs-cli: keyring item is invalid; run docs-cli gemini-key")
+	errKeyringItemTooBig  = errors.New("docs-cli: keyring item exceeds the 4096 byte command limit")
+	errGeminiTimeout      = errors.New("docs-cli: gemini mapping rejected: timeout")
+	errGeminiHTTP         = errors.New("docs-cli: gemini mapping rejected: http")
+	errGeminiResponse     = errors.New("docs-cli: gemini mapping rejected: response")
+	errGeminiBlocks       = errors.New("docs-cli: gemini mapping rejected: blocks")
 )
+
+// rejectError is a stderr line that may wrap a cause without including the cause text.
+type rejectError struct {
+	msg   string
+	cause error
+}
+
+func (e *rejectError) Error() string { return e.msg }
+
+func (e *rejectError) Unwrap() error { return e.cause }
 
 type geminiKey struct {
 	APIKey string `json:"api_key"`
@@ -104,15 +123,16 @@ func LoadGeminiKey() (string, error) {
 
 // CollectBlocks lists li items and non-heading paragraphs in jobAdDetails.
 // Each block keeps the heading text that preceded it. Emails are removed.
-// Header fields are not collected.
+// Header fields are not collected. A failure's Error text is the blocks
+// stderr line and does not include the parser or sentinel text.
 func CollectBlocks(page []byte) ([]Block, error) {
 	root, err := html.Parse(strings.NewReader(string(page)))
 	if err != nil {
-		return nil, err
+		return nil, blockReject(err)
 	}
 	body := findAutomation(root, "jobAdDetails")
 	if body == nil {
-		return nil, ErrJobAdDetailsNotFound
+		return nil, blockReject(ErrJobAdDetailsNotFound)
 	}
 	var blocks []Block
 	walkBlocks(body, "", &blocks)
@@ -168,10 +188,16 @@ func appendBlock(blocks *[]Block, heading, text string) {
 	*blocks = append(*blocks, Block{Heading: redact(heading), Text: text})
 }
 
+func blockReject(cause error) error {
+	return &rejectError{msg: errGeminiBlocks.Error(), cause: cause}
+}
+
 // MapSections asks Gemini once to partition blocks into the four section arrays.
 // The key is sent only in the x-goog-api-key header. Header and Source of
-// fallback stay as given. A missing key, keyring failure, HTTP failure, or a
-// reply that is not an exact partition of the block texts returns fallback.
+// fallback stay as given. A missing key or keyring failure returns that error.
+// A transport failure, bad response, or inexact partition returns fallback and
+// an error whose Error text is the stderr reason. The text does not include
+// the HTTP body, the transport error, or the API key.
 func MapSections(ctx context.Context, fallback Document, blocks []Block, client *http.Client) (Document, error) {
 	key, err := LoadGeminiKey()
 	if err != nil {
@@ -187,8 +213,11 @@ func MapSections(ctx context.Context, fallback Document, blocks []Block, client 
 	defer cancel()
 
 	mapped, err := requestMapping(ctx, client, key, blocks)
-	if err != nil || !partitionOK(blocks, mapped) {
-		return fallback, errGeminiMappingRejected
+	if err != nil {
+		return fallback, err
+	}
+	if !partitionOK(blocks, mapped) {
+		return fallback, partitionRejectError(key, blocks, mapped)
 	}
 	fallback.Offer = cloneStrings(mapped.Offer)
 	fallback.Duties = cloneStrings(mapped.Duties)
@@ -200,24 +229,106 @@ func MapSections(ctx context.Context, fallback Document, blocks []Block, client 
 func requestMapping(ctx context.Context, client *http.Client, key string, blocks []Block) (sectionMapping, error) {
 	payload, err := geminiRequestBody(mappingPrompt(blocks))
 	if err != nil {
-		return sectionMapping{}, err
+		return sectionMapping{}, errGeminiResponse
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, geminiURL, bytes.NewReader(payload))
 	if err != nil {
-		return sectionMapping{}, err
+		return sectionMapping{}, errGeminiResponse
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-goog-api-key", key)
 	resp, err := client.Do(req)
 	if err != nil {
-		return sectionMapping{}, err
+		return sectionMapping{}, geminiTransportError(err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGeminiResponse+1))
-	if err != nil || resp.StatusCode != http.StatusOK || len(body) > maxGeminiResponse {
-		return sectionMapping{}, errors.New("rejected")
+	if resp.StatusCode != http.StatusOK {
+		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxGeminiErrorBody))
+		if readErr != nil {
+			errBody = nil
+		}
+		return sectionMapping{}, geminiStatusError(resp.StatusCode, errBody, key)
 	}
-	return parseMapping(body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGeminiResponse+1))
+	if err != nil || len(body) > maxGeminiResponse {
+		return sectionMapping{}, errGeminiResponse
+	}
+	mapped, err := parseMapping(body)
+	if err != nil {
+		return sectionMapping{}, errGeminiResponse
+	}
+	return mapped, nil
+}
+
+func geminiTransportError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errGeminiTimeout
+	}
+	var timeout net.Error
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return errGeminiTimeout
+	}
+	return errGeminiHTTP
+}
+
+func geminiStatusError(code int, body []byte, key string) error {
+	first := "docs-cli: gemini mapping rejected: status " + strconv.Itoa(code)
+	suffix, ok := geminiErrorSuffix(body)
+	if !ok {
+		return errors.New(first)
+	}
+	if key != "" && strings.Contains(suffix, key) {
+		return errors.New(first)
+	}
+	if utf8.RuneCountInString(suffix) > maxStatusDetailRunes {
+		suffix = string([]rune(suffix)[:maxStatusDetailRunes])
+	}
+	second := "docs-cli: gemini mapping rejected: " + suffix
+	if key != "" && strings.Contains(second, key) {
+		return errors.New(first)
+	}
+	return errors.New(first + "\n" + second)
+}
+
+// geminiErrorSuffix reads only the string fields error.status and error.message.
+func geminiErrorSuffix(body []byte) (string, bool) {
+	if len(body) == 0 {
+		return "", false
+	}
+	var env struct {
+		Error struct {
+			Status  json.RawMessage `json:"status"`
+			Message json.RawMessage `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return "", false
+	}
+	status, statusOK := rawJSONString(env.Error.Status)
+	message, messageOK := rawJSONString(env.Error.Message)
+	status = strings.Join(strings.Fields(status), " ")
+	message = strings.Join(strings.Fields(message), " ")
+	switch {
+	case statusOK && status != "" && messageOK && message != "":
+		return status + ": " + message, true
+	case messageOK && message != "":
+		return message, true
+	case statusOK && status != "":
+		return status, true
+	default:
+		return "", false
+	}
+}
+
+func rawJSONString(raw json.RawMessage) (string, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", false
+	}
+	return s, true
 }
 
 func geminiRequestBody(prompt string) ([]byte, error) {
@@ -273,7 +384,7 @@ func parseMapping(raw []byte) (sectionMapping, error) {
 		} `json:"candidates"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil || len(env.Candidates) == 0 {
-		return sectionMapping{}, errors.New("rejected")
+		return sectionMapping{}, errGeminiResponse
 	}
 	var text strings.Builder
 	for _, part := range env.Candidates[0].Content.Parts {
@@ -283,11 +394,11 @@ func parseMapping(raw []byte) (sectionMapping, error) {
 	dec.DisallowUnknownFields()
 	var mapped sectionMapping
 	if err := dec.Decode(&mapped); err != nil {
-		return sectionMapping{}, err
+		return sectionMapping{}, errGeminiResponse
 	}
 	var extra any
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return sectionMapping{}, err
+		return sectionMapping{}, errGeminiResponse
 	}
 	return mapped, nil
 }
@@ -314,6 +425,85 @@ func partitionOK(blocks []Block, mapped sectionMapping) bool {
 		}
 	}
 	return true
+}
+
+func partitionRejectError(key string, blocks []Block, mapped sectionMapping) error {
+	sentCount := make(map[string]int, len(blocks))
+	for _, block := range blocks {
+		sentCount[block.Text]++
+	}
+	replyCount := map[string]int{}
+	replyN := 0
+	var replyOrder []string
+	for _, items := range [][]string{mapped.Offer, mapped.Duties, mapped.Requirements, mapped.Trailer} {
+		for _, item := range items {
+			replyCount[item]++
+			replyOrder = append(replyOrder, item)
+			replyN++
+		}
+	}
+	missingN := 0
+	for text, n := range sentCount {
+		if got := replyCount[text]; n > got {
+			missingN += n - got
+		}
+	}
+	extraN := 0
+	for text, n := range replyCount {
+		if got := sentCount[text]; n > got {
+			extraN += n - got
+		}
+	}
+	var b strings.Builder
+	b.WriteString("docs-cli: gemini mapping rejected: partition\n")
+	fmt.Fprintf(&b, "docs-cli: gemini mapping rejected: sent=%d reply=%d missing=%d extra=%d", len(blocks), replyN, missingN, extraN)
+	sentOrder := make([]string, len(blocks))
+	for i, block := range blocks {
+		sentOrder[i] = block.Text
+	}
+	appendRejectSamples(&b, "missing", surplusTexts(sentOrder, replyCount), key)
+	appendRejectSamples(&b, "extra", surplusTexts(replyOrder, sentCount), key)
+	return errors.New(b.String())
+}
+
+// surplusTexts lists texts in order whose occurrence was not covered by have.
+func surplusTexts(order []string, have map[string]int) []string {
+	left := make(map[string]int, len(have))
+	for text, n := range have {
+		left[text] = n
+	}
+	var out []string
+	for _, text := range order {
+		if left[text] > 0 {
+			left[text]--
+			continue
+		}
+		out = append(out, text)
+	}
+	return out
+}
+
+func appendRejectSamples(b *strings.Builder, kind string, texts []string, key string) {
+	printed := 0
+	for _, text := range texts {
+		collapsed := strings.Join(strings.Fields(text), " ")
+		shown := collapsed
+		if utf8.RuneCountInString(shown) > maxRejectRunes {
+			shown = string([]rune(shown)[:maxRejectRunes])
+		}
+		if key != "" && (strings.Contains(collapsed, key) || strings.Contains(shown, key)) {
+			continue
+		}
+		b.WriteByte('\n')
+		b.WriteString("docs-cli: gemini mapping rejected: ")
+		b.WriteString(kind)
+		b.WriteString(": ")
+		b.WriteString(shown)
+		printed++
+		if printed == 3 {
+			return
+		}
+	}
 }
 
 func cloneStrings(in []string) []string {

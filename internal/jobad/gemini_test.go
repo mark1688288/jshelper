@@ -175,6 +175,7 @@ func TestMapSectionsAcceptsExactPartition(t *testing.T) {
 }
 
 func TestMapSectionsRejectsInexactReply(t *testing.T) {
+	const key = "gemini-test-key"
 	blocks := []Block{
 		{Heading: "What we offer", Text: "Medical insurance"},
 		{Heading: "Job Requirement", Text: "Degree holder"},
@@ -184,33 +185,324 @@ func TestMapSectionsRejectsInexactReply(t *testing.T) {
 		name     string
 		status   int
 		response string
+		want     string
+		hidden   []string
 	}{
-		{"rewrite", http.StatusOK, geminiEnvelope(t, sectionMapping{Offer: []string{"Medical insurance coverage"}, Requirements: []string{"Degree holder"}})},
-		{"extra", http.StatusOK, geminiEnvelope(t, sectionMapping{Offer: []string{"Medical insurance"}, Requirements: []string{"Degree holder"}, Trailer: []string{"Invented line"}})},
-		{"missing", http.StatusOK, geminiEnvelope(t, sectionMapping{Offer: []string{"Medical insurance"}})},
-		{"http", http.StatusBadGateway, `{"candidates":[]}`},
-		{"prose", http.StatusOK, `{"candidates":[{"content":{"parts":[{"text":"not json"}]}}]}`},
+		{
+			name:     "rewrite",
+			status:   http.StatusOK,
+			response: geminiEnvelope(t, sectionMapping{Offer: []string{"Medical insurance coverage"}, Requirements: []string{"Degree holder"}}),
+			want: "docs-cli: gemini mapping rejected: partition\n" +
+				"docs-cli: gemini mapping rejected: sent=2 reply=2 missing=1 extra=1\n" +
+				"docs-cli: gemini mapping rejected: missing: Medical insurance\n" +
+				"docs-cli: gemini mapping rejected: extra: Medical insurance coverage",
+		},
+		{
+			name:     "extra",
+			status:   http.StatusOK,
+			response: geminiEnvelope(t, sectionMapping{Offer: []string{"Medical insurance"}, Requirements: []string{"Degree holder"}, Trailer: []string{"Invented line"}}),
+			want: "docs-cli: gemini mapping rejected: partition\n" +
+				"docs-cli: gemini mapping rejected: sent=2 reply=3 missing=0 extra=1\n" +
+				"docs-cli: gemini mapping rejected: extra: Invented line",
+		},
+		{
+			name:     "missing",
+			status:   http.StatusOK,
+			response: geminiEnvelope(t, sectionMapping{Offer: []string{"Medical insurance"}}),
+			want: "docs-cli: gemini mapping rejected: partition\n" +
+				"docs-cli: gemini mapping rejected: sent=2 reply=1 missing=1 extra=0\n" +
+				"docs-cli: gemini mapping rejected: missing: Degree holder",
+		},
+		{
+			name:     "status",
+			status:   http.StatusBadGateway,
+			response: `{"error":"UPSTREAM-BODY ` + key + `"}`,
+			want:     "docs-cli: gemini mapping rejected: status 502",
+			hidden:   []string{"UPSTREAM-BODY", key},
+		},
+		{
+			name:     "prose",
+			status:   http.StatusOK,
+			response: `{"candidates":[{"content":{"parts":[{"text":"not json ` + key + `"}]}}]}`,
+			want:     errGeminiResponse.Error(),
+			hidden:   []string{key, "not json"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cleanKeyring(t)
-			if err := StoreGeminiKey("gemini-test-key"); err != nil {
+			if err := StoreGeminiKey(key); err != nil {
 				t.Fatal(err)
 			}
 			client, _ := testGeminiClient(t, tc.status, tc.response)
 			got, err := MapSections(context.Background(), fallback, blocks, client)
-			if !errors.Is(err, errGeminiMappingRejected) || err.Error() != "docs-cli: gemini mapping rejected" {
+			if err == nil || err.Error() != tc.want || err.Error() == "docs-cli: gemini mapping rejected" {
 				t.Fatalf("err = %v", err)
 			}
-			if join(got.Offer) != join(fallback.Offer) || join(got.Duties) != join(fallback.Duties) || join(got.Requirements) != join(fallback.Requirements) || join(got.Trailer) != join(fallback.Trailer) {
-				t.Fatalf("phrase result replaced: %#v", got)
+			for _, secret := range tc.hidden {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("stderr leaked %q in %q", secret, err.Error())
+				}
 			}
-			if got.Header != fallback.Header || got.Source != fallback.Source {
-				t.Fatalf("header or source changed: %#v", got)
-			}
+			assertPhraseKept(t, got, fallback)
 		})
 	}
 }
+
+func TestMapSectionsPartitionSamples(t *testing.T) {
+	const key = "gemini-test-key"
+	fallback := phraseDoc()
+	long := strings.Repeat("測", maxRejectRunes+1)
+	spaced := "  spaced \n\t line  "
+	blocks := []Block{
+		{Text: "Keep one"},
+		{Text: "Keep two"},
+		{Text: "Keep three"},
+		{Text: "Keep four"},
+		{Text: "Keep five"},
+	}
+	mapped := sectionMapping{
+		Offer:  []string{spaced, long},
+		Duties: []string{"Fifth extra", "Sixth extra"},
+	}
+	cleanKeyring(t)
+	if err := StoreGeminiKey(key); err != nil {
+		t.Fatal(err)
+	}
+	client, _ := testGeminiClient(t, http.StatusOK, geminiEnvelope(t, mapped))
+	_, err := MapSections(context.Background(), fallback, blocks, client)
+	if err == nil {
+		t.Fatal("expected partition rejection")
+	}
+	want := "docs-cli: gemini mapping rejected: partition\n" +
+		"docs-cli: gemini mapping rejected: sent=5 reply=4 missing=5 extra=4\n" +
+		"docs-cli: gemini mapping rejected: missing: Keep one\n" +
+		"docs-cli: gemini mapping rejected: missing: Keep two\n" +
+		"docs-cli: gemini mapping rejected: missing: Keep three\n" +
+		"docs-cli: gemini mapping rejected: extra: spaced line\n" +
+		"docs-cli: gemini mapping rejected: extra: " + strings.Repeat("測", maxRejectRunes) + "\n" +
+		"docs-cli: gemini mapping rejected: extra: Fifth extra"
+	if err.Error() != want {
+		t.Fatalf("err = %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "Keep four") || strings.Contains(err.Error(), "Keep five") || strings.Contains(err.Error(), "Sixth extra") || strings.Contains(err.Error(), "...") {
+		t.Fatalf("sample leaked or ellipsis added: %q", err.Error())
+	}
+	if strings.Count(err.Error(), "測") != maxRejectRunes {
+		t.Fatalf("rune clip = %d", strings.Count(err.Error(), "測"))
+	}
+
+	t.Run("hides lines that contain the api key", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		keyBlocks := []Block{{Text: key}, {Text: "Visible missing"}}
+		reply := sectionMapping{Offer: []string{key + " tail", "Other extra"}}
+		client, _ := testGeminiClient(t, http.StatusOK, geminiEnvelope(t, reply))
+		_, err := MapSections(context.Background(), fallback, keyBlocks, client)
+		want := "docs-cli: gemini mapping rejected: partition\n" +
+			"docs-cli: gemini mapping rejected: sent=2 reply=2 missing=2 extra=2\n" +
+			"docs-cli: gemini mapping rejected: missing: Visible missing\n" +
+			"docs-cli: gemini mapping rejected: extra: Other extra"
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(err.Error(), key) {
+			t.Fatalf("api key leaked: %q", err.Error())
+		}
+	})
+
+	t.Run("duplicate delta", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		dup := []Block{{Text: "Medical insurance"}, {Text: "Medical insurance"}}
+		reply := sectionMapping{Offer: []string{"Medical insurance"}}
+		client, _ := testGeminiClient(t, http.StatusOK, geminiEnvelope(t, reply))
+		_, err := MapSections(context.Background(), fallback, dup, client)
+		want := "docs-cli: gemini mapping rejected: partition\n" +
+			"docs-cli: gemini mapping rejected: sent=2 reply=1 missing=1 extra=0\n" +
+			"docs-cli: gemini mapping rejected: missing: Medical insurance"
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestMapSectionsRejectReasons(t *testing.T) {
+	const key = "gemini-test-key"
+	const leak = "UPSTREAM-ERR dial tcp secret"
+	fallback := phraseDoc()
+	blocks := []Block{{Text: "Medical insurance"}}
+
+	t.Run("timeout", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, &netTimeout{msg: leak}
+		})}
+		_, err := MapSections(context.Background(), fallback, blocks, client)
+		if !errors.Is(err, errGeminiTimeout) || err.Error() != errGeminiTimeout.Error() {
+			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(err.Error(), leak) || strings.Contains(err.Error(), "dial") {
+			t.Fatalf("transport text leaked: %v", err)
+		}
+	})
+
+	t.Run("deadline", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, context.DeadlineExceeded
+		})}
+		_, err := MapSections(context.Background(), fallback, blocks, client)
+		if !errors.Is(err, errGeminiTimeout) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("http", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New(leak)
+		})}
+		_, err := MapSections(context.Background(), fallback, blocks, client)
+		if !errors.Is(err, errGeminiHTTP) || strings.Contains(err.Error(), leak) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("response too long", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		body := "BODY-SECRET-" + key + strings.Repeat("x", maxGeminiResponse)
+		client, _ := testGeminiClient(t, http.StatusOK, body)
+		_, err := MapSections(context.Background(), fallback, blocks, client)
+		if !errors.Is(err, errGeminiResponse) || strings.Contains(err.Error(), "BODY-SECRET") || strings.Contains(err.Error(), key) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("no candidates", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		client, _ := testGeminiClient(t, http.StatusOK, `{"candidates":[]}`)
+		_, err := MapSections(context.Background(), fallback, blocks, client)
+		if !errors.Is(err, errGeminiResponse) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("status 500", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		client, _ := testGeminiClient(t, http.StatusInternalServerError, "BODY-SECRET-"+key)
+		_, err := MapSections(context.Background(), fallback, blocks, client)
+		if err == nil || err.Error() != "docs-cli: gemini mapping rejected: status 500" {
+			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(err.Error(), "BODY-SECRET") || strings.Contains(err.Error(), key) {
+			t.Fatalf("body leaked: %v", err)
+		}
+	})
+}
+
+func TestMapSectionsStatusErrorMessage(t *testing.T) {
+	const key = "gemini-test-key"
+	const demand = "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."
+	fallback := phraseDoc()
+	blocks := []Block{{Text: "Medical insurance"}}
+
+	t.Run("503 high demand", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"error":{"code":503,"message":"` + demand + `","status":"UNAVAILABLE","details":["DETAIL-SECRET ` + key + `"]}}`
+		client, _ := testGeminiClient(t, http.StatusServiceUnavailable, body)
+		_, err := MapSections(context.Background(), fallback, blocks, client)
+		want := "docs-cli: gemini mapping rejected: status 503\n" +
+			"docs-cli: gemini mapping rejected: UNAVAILABLE: " + demand
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %q", err)
+		}
+		if strings.Contains(err.Error(), "DETAIL-SECRET") || strings.Contains(err.Error(), key) {
+			t.Fatalf("detail leaked: %q", err.Error())
+		}
+	})
+
+	t.Run("message hides api key", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"error":{"status":"UNAVAILABLE","message":"see ` + key + `"}}`
+		client, _ := testGeminiClient(t, http.StatusServiceUnavailable, body)
+		_, err := MapSections(context.Background(), fallback, blocks, client)
+		if err == nil || err.Error() != "docs-cli: gemini mapping rejected: status 503" || strings.Contains(err.Error(), key) {
+			t.Fatalf("err = %q", err)
+		}
+	})
+
+	t.Run("non string fields stay hidden", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"error":{"status":503,"message":{"text":"SECRET-DETAIL"},"details":["BODY-SECRET"]}}`
+		client, _ := testGeminiClient(t, http.StatusInternalServerError, body)
+		_, err := MapSections(context.Background(), fallback, blocks, client)
+		if err == nil || err.Error() != "docs-cli: gemini mapping rejected: status 500" {
+			t.Fatalf("err = %q", err)
+		}
+		if strings.Contains(err.Error(), "SECRET-DETAIL") || strings.Contains(err.Error(), "BODY-SECRET") {
+			t.Fatalf("raw field leaked: %q", err.Error())
+		}
+	})
+
+	t.Run("whitespace and clip", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		long := strings.Repeat("測", 300)
+		body := `{"error":{"status":"  S  ","message":"` + long + `"}}`
+		client, _ := testGeminiClient(t, http.StatusBadGateway, body)
+		_, err := MapSections(context.Background(), fallback, blocks, client)
+		suffix := "S: " + long
+		suffix = string([]rune(suffix)[:maxStatusDetailRunes])
+		want := "docs-cli: gemini mapping rejected: status 502\n" +
+			"docs-cli: gemini mapping rejected: " + suffix
+		if err == nil || err.Error() != want || strings.Contains(err.Error(), "...") {
+			t.Fatalf("err = %q", err)
+		}
+		if strings.Count(err.Error(), "測") != maxStatusDetailRunes-len("S: ") {
+			t.Fatalf("clip = %d", strings.Count(err.Error(), "測"))
+		}
+	})
+}
+
+type netTimeout struct{ msg string }
+
+func (e *netTimeout) Error() string   { return e.msg }
+func (e *netTimeout) Timeout() bool   { return true }
+func (e *netTimeout) Temporary() bool { return true }
 
 func TestMapSectionsNoKeySkipsHTTP(t *testing.T) {
 	cleanKeyring(t)
@@ -242,8 +534,11 @@ func TestMapSectionsCancelledContext(t *testing.T) {
 	cancel()
 	fallback := phraseDoc()
 	got, err := MapSections(ctx, fallback, []Block{{Text: "Medical insurance"}}, client)
-	if !errors.Is(err, errGeminiMappingRejected) {
+	if !errors.Is(err, errGeminiHTTP) || err.Error() != errGeminiHTTP.Error() {
 		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(err.Error(), "canceled") || strings.Contains(err.Error(), "context") {
+		t.Fatalf("transport text leaked: %v", err)
 	}
 	if join(got.Offer) != join(fallback.Offer) || got.Header != fallback.Header {
 		t.Fatalf("phrase result replaced: %#v", got)
@@ -285,8 +580,11 @@ func TestCollectBlocks(t *testing.T) {
 	}
 
 	_, err = CollectBlocks([]byte(`<p>no ad</p>`))
-	if !errors.Is(err, ErrJobAdDetailsNotFound) {
+	if !errors.Is(err, ErrJobAdDetailsNotFound) || err.Error() != errGeminiBlocks.Error() {
 		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(err.Error(), "jobad:") {
+		t.Fatalf("cause text leaked: %v", err)
 	}
 }
 
@@ -440,6 +738,16 @@ func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block
 		if !strings.Contains(cap.body, block.Text) || !strings.Contains(cap.body, block.Heading) {
 			t.Fatalf("body missing block %#v", block)
 		}
+	}
+}
+
+func assertPhraseKept(t *testing.T, got, fallback Document) {
+	t.Helper()
+	if join(got.Offer) != join(fallback.Offer) || join(got.Duties) != join(fallback.Duties) || join(got.Requirements) != join(fallback.Requirements) || join(got.Trailer) != join(fallback.Trailer) {
+		t.Fatalf("phrase result replaced: %#v", got)
+	}
+	if got.Header != fallback.Header || got.Source != fallback.Source {
+		t.Fatalf("header or source changed: %#v", got)
 	}
 }
 

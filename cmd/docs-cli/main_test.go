@@ -1479,7 +1479,87 @@ func TestParsePromptsThenMaps(t *testing.T) {
 			Stderr:       &stderr,
 			GeminiClient: mappingClient(t, http.StatusOK, reply, &geminiCapture{}),
 		})
-		if code != 0 || stdout.String() != phrase || stderr.String() != errGeminiRejected+"\n" {
+		want := "docs-cli: gemini mapping rejected: partition\n" +
+			"docs-cli: gemini mapping rejected: sent=4 reply=2 missing=3 extra=1\n" +
+			"docs-cli: gemini mapping rejected: missing: Build tools\n" +
+			"docs-cli: gemini mapping rejected: missing: Go experience\n" +
+			"docs-cli: gemini mapping rejected: missing: Apply by form\n" +
+			"docs-cli: gemini mapping rejected: extra: invented\n"
+		if code != 0 || stdout.String() != phrase || stderr.String() != want {
+			t.Fatalf("exit %d stdout %s stderr %q", code, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stderr.String(), "docs-cli: docs-cli:") || stderr.String() == "docs-cli: gemini mapping rejected\n" {
+			t.Fatalf("stderr %q", stderr.String())
+		}
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+	})
+
+	t.Run("status body stays off stderr", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		const upstream = "UPSTREAM-BODY"
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"parse", "--html", path}, deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			GeminiClient: mappingClient(t, http.StatusInternalServerError, upstream+" "+apiKey, &geminiCapture{}),
+		})
+		if code != 0 || stdout.String() != phrase || stderr.String() != "docs-cli: gemini mapping rejected: status 500\n" {
+			t.Fatalf("exit %d stdout %s stderr %q", code, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stderr.String(), upstream) || strings.Contains(stderr.String(), "docs-cli: docs-cli:") {
+			t.Fatalf("stderr %q", stderr.String())
+		}
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+	})
+
+	t.Run("status 503 prints error message", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		const demand = "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."
+		body := `{"error":{"code":503,"message":"` + demand + `","status":"UNAVAILABLE","details":["DETAIL ` + apiKey + `"]}}`
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"parse", "--html", path}, deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			GeminiClient: mappingClient(t, http.StatusServiceUnavailable, body, &geminiCapture{}),
+		})
+		want := "docs-cli: gemini mapping rejected: status 503\n" +
+			"docs-cli: gemini mapping rejected: UNAVAILABLE: " + demand + "\n"
+		if code != 0 || stdout.String() != phrase || stderr.String() != want {
+			t.Fatalf("exit %d stdout %s stderr %q", code, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stderr.String(), "DETAIL") || strings.Contains(stderr.String(), "docs-cli: docs-cli:") {
+			t.Fatalf("stderr %q", stderr.String())
+		}
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+	})
+
+	t.Run("mapping hides api key line", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		reply := geminiReply(t, []string{apiKey}, nil, nil, nil)
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"parse", "--html", path}, deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			GeminiClient: mappingClient(t, http.StatusOK, reply, &geminiCapture{}),
+		})
+		want := "docs-cli: gemini mapping rejected: partition\n" +
+			"docs-cli: gemini mapping rejected: sent=4 reply=1 missing=4 extra=1\n" +
+			"docs-cli: gemini mapping rejected: missing: Medical insurance\n" +
+			"docs-cli: gemini mapping rejected: missing: Build tools\n" +
+			"docs-cli: gemini mapping rejected: missing: Go experience\n"
+		if code != 0 || stdout.String() != phrase || stderr.String() != want {
 			t.Fatalf("exit %d stdout %s stderr %q", code, stdout.String(), stderr.String())
 		}
 		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
