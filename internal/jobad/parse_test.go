@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestParseJobsDBSections(t *testing.T) {
@@ -228,6 +229,167 @@ func TestParseLongSalaryWarningIsNotAHeading(t *testing.T) {
 	blob := strings.Join(append(append(append(doc.Offer, doc.Duties...), doc.Requirements...), doc.Trailer...), "\n")
 	if strings.Contains(blob, warning) {
 		t.Fatalf("salary warning was kept: %s", blob)
+	}
+}
+
+func TestParseUnclassifiedStrongGapCeiling(t *testing.T) {
+	forty := strings.Repeat("a", 40)
+	fortyOne := strings.Repeat("b", 41)
+	if utf8.RuneCountInString(normalizeHeading(forty)) != 40 || utf8.RuneCountInString(normalizeHeading(fortyOne)) != 41 {
+		t.Fatal("boundary fixture rune count drifted")
+	}
+
+	cut := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>Job Description</strong></p>
+		<ul><li>Write design notes</li></ul>
+		<p><strong>`+forty+`</strong></p>
+		<ul><li>Cut to trailer</li></ul>
+	</div>`)
+	if got, want := strings.Join(cut.Duties, "|"), "Write design notes"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if got, want := strings.Join(cut.Trailer, "|"), "Cut to trailer"; got != want {
+		t.Fatalf("trailer = %q", got)
+	}
+	if len(cut.Requirements) != 0 {
+		t.Fatalf("requirements = %#v", cut.Requirements)
+	}
+
+	stay := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>Job Description</strong></p>
+		<ul><li>Write design notes</li></ul>
+		<p><strong>`+fortyOne+`</strong></p>
+		<ul><li>Stay in duties</li></ul>
+	</div>`)
+	if got, want := strings.Join(stay.Duties, "|"), "Write design notes|Stay in duties"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if len(stay.Trailer) != 0 || len(stay.Requirements) != 0 {
+		t.Fatalf("trailer = %#v requirements = %#v", stay.Trailer, stay.Requirements)
+	}
+	if strings.Contains(strings.Join(stay.Duties, "\n"), fortyOne) {
+		t.Fatalf("41-rune label was kept: %s", strings.Join(stay.Duties, "\n"))
+	}
+}
+
+func TestParseLongSubsectionLabelStaysInDuties(t *testing.T) {
+	const mission = "The AI Enablement Lead will own three interconnected missions"
+	if utf8.RuneCountInString(normalizeHeading(mission)) != 61 {
+		t.Fatalf("mission runes = %d", utf8.RuneCountInString(normalizeHeading(mission)))
+	}
+	label := "1. " + strings.Repeat("n", 45)
+	if n := utf8.RuneCountInString(normalizeHeading(label)); n < 46 || n > 52 {
+		t.Fatalf("numbered label runes = %d", n)
+	}
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>Key Responsibilities</strong></p>
+		<p><strong>`+mission+`</strong></p>
+		<ul><li>Embed with the CEO</li></ul>
+		<p><strong>`+label+`</strong></p>
+		<ul><li>Set the operating rhythm</li></ul>
+		<p><strong>Team culture:</strong></p>
+		<ul><li>We share context openly</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Duties, "|"), "Embed with the CEO|Set the operating rhythm"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if got, want := strings.Join(doc.Trailer, "|"), "We share context openly"; got != want {
+		t.Fatalf("trailer = %q", got)
+	}
+	if len(doc.Offer) != 0 || len(doc.Requirements) != 0 {
+		t.Fatalf("offer = %#v requirements = %#v", doc.Offer, doc.Requirements)
+	}
+	blob := strings.Join(append(doc.Duties, doc.Trailer...), "\n")
+	if strings.Contains(blob, mission) || strings.Contains(blob, label) {
+		t.Fatalf("subsection label was kept: %s", blob)
+	}
+}
+
+func TestParseResponsibilitiesHeadingOverGapCeiling(t *testing.T) {
+	heading := "Key responsibilities " + strings.Repeat("z", 25)
+	if n := utf8.RuneCountInString(normalizeHeading(heading)); n < 41 || n > 80 {
+		t.Fatalf("heading runes = %d", n)
+	}
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>`+heading+`</strong></p>
+		<ul><li>Own the service</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Duties, "|"), "Own the service"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if len(doc.Trailer) != 0 || len(doc.Requirements) != 0 {
+		t.Fatalf("trailer = %#v requirements = %#v", doc.Trailer, doc.Requirements)
+	}
+}
+
+func TestParseWholeParagraphHeadingKeepsEightyRunes(t *testing.T) {
+	atEighty := "looking for " + strings.Repeat("x", 68)
+	overEighty := "looking for " + strings.Repeat("y", 69)
+	if utf8.RuneCountInString(normalizeHeading(atEighty)) != 80 {
+		t.Fatalf("80-rune paragraph = %d", utf8.RuneCountInString(normalizeHeading(atEighty)))
+	}
+	if utf8.RuneCountInString(normalizeHeading(overEighty)) != 81 {
+		t.Fatalf("81-rune paragraph = %d", utf8.RuneCountInString(normalizeHeading(overEighty)))
+	}
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>Job Description</strong></p>
+		<ul><li>Write design notes</li></ul>
+		<p>`+atEighty+`</p>
+		<ul><li>Degree in Computer Science</li></ul>
+		<p><strong>Job Description</strong></p>
+		<ul><li>Back to duties</li></ul>
+		<p>`+overEighty+`</p>
+		<ul><li>Still a duty</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Requirements, "|"), "Degree in Computer Science"; got != want {
+		t.Fatalf("requirements = %q", got)
+	}
+	if got, want := strings.Join(doc.Duties, "|"), "Write design notes|Back to duties|Still a duty"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	blob := strings.Join(append(append(doc.Duties, doc.Requirements...), doc.Trailer...), "\n")
+	if strings.Contains(blob, overEighty) {
+		t.Fatalf("over-80 paragraph was kept: %s", blob)
+	}
+}
+
+func TestParseShortGapLabelsStillCutToTrailer(t *testing.T) {
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>Job Description</strong></p>
+		<ul><li>Write design notes</li></ul>
+		<p><strong>Benefits</strong></p>
+		<ul><li>Medical cover</li></ul>
+		<p><strong>Why this role</strong></p>
+		<ul><li>Own the domain</li></ul>
+		<p><strong>This role is not</strong></p>
+		<ul><li>A support rota</li></ul>
+		<p><strong>Who we are</strong></p>
+		<ul><li>A small team</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Duties, "|"), "Write design notes"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if got, want := strings.Join(doc.Trailer, "|"), "Medical cover|Own the domain|A support rota|A small team"; got != want {
+		t.Fatalf("trailer = %q", got)
+	}
+	if len(doc.Requirements) != 0 {
+		t.Fatalf("requirements = %#v", doc.Requirements)
+	}
+}
+
+func TestParseAboutTheRoleParagraphIsNotADuty(t *testing.T) {
+	const para = "You will partner with product on the roadmap."
+	doc := parseHTML(t, `<div data-automation="jobAdDetails">
+		<p><strong>About the Role</strong></p>
+		<p>`+para+`</p>
+		<ul><li>Own the service</li></ul>
+	</div>`)
+	if got, want := strings.Join(doc.Duties, "|"), "Own the service"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	blob := strings.Join(append(append(append(doc.Offer, doc.Duties...), doc.Requirements...), doc.Trailer...), "\n")
+	if strings.Contains(blob, para) {
+		t.Fatalf("bare paragraph was kept: %s", blob)
 	}
 }
 
