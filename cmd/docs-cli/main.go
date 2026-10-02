@@ -64,7 +64,6 @@ const (
 	errGeminiKeyMissing  = "docs-cli: gemini api key is not in the keyring"
 	errGeminiKeyTerminal = "docs-cli: gemini api key must be entered in a terminal"
 	errGeminiStored      = "docs-cli: stored gemini api key in keyring"
-	errGeminiRejected    = "docs-cli: gemini mapping rejected"
 
 	// geminiKeyPrompt is the ReadSecret prompt for gemini-key and for parse
 	// when the keyring item is missing. The typed key is not echoed.
@@ -538,7 +537,7 @@ func applyGemini(ctx context.Context, d deps, page []byte, doc jobad.Document) j
 
 	blocks, err := jobad.CollectBlocks(page)
 	if err != nil {
-		fmt.Fprintln(d.Stderr, errGeminiRejected)
+		fmt.Fprintln(d.Stderr, err.Error())
 		return doc
 	}
 	mapped, err := d.mapSections(ctx, doc, blocks)
