@@ -46,11 +46,34 @@ func TestPromptLabels(t *testing.T) {
 	}
 }
 
+func TestPromptOmitsCompany(t *testing.T) {
+	doc := Document{
+		Header: Header{
+			TitleBlock: "System Analyst",
+			Company:    "COMPANY-TOKEN",
+		},
+		Requirements: []string{"Know Go"},
+	}
+	got, err := PromptText(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "COMPANY-TOKEN") || strings.Contains(got, "Company:") {
+		t.Fatalf("prompt contains company\n%s", got)
+	}
+	for _, keep := range []string{"Title:\nSystem Analyst", "Requirements:\n- Know Go"} {
+		if !strings.Contains(got, keep) {
+			t.Fatalf("prompt missing %q\n%s", keep, got)
+		}
+	}
+}
+
 func TestPromptOmitsTrailer(t *testing.T) {
 	doc := Document{
 		Source: "source-token-9f3a.html",
 		Header: Header{
 			TitleBlock:     "Analyst person@example.com",
+			Company:        "COMPANY-TOKEN",
 			Location:       "LOCATION-TOKEN",
 			WorkType:       "WORKTYPE-TOKEN",
 			Classification: "CLASS-TOKEN",
@@ -69,6 +92,7 @@ func TestPromptOmitsTrailer(t *testing.T) {
 		"TRAILER-SENTINEL",
 		"person@example.com",
 		"hidden@example.com",
+		"COMPANY-TOKEN",
 		"LOCATION-TOKEN",
 		"WORKTYPE-TOKEN",
 		"CLASS-TOKEN",

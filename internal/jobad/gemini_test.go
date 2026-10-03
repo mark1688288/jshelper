@@ -172,7 +172,7 @@ func TestMapSectionsAcceptsExactPartition(t *testing.T) {
 	if got.Benefits == nil || got.Trailer == nil {
 		t.Fatal("accepted empty section is nil")
 	}
-	assertGeminiRequest(t, cap, key, blocks, fallback.Header.TitleBlock)
+	assertGeminiRequest(t, cap, key, blocks, fallback.Header)
 }
 
 func TestMapSectionsRejectsInexactReply(t *testing.T) {
@@ -549,6 +549,7 @@ func TestMapSectionsCancelledContext(t *testing.T) {
 func TestCollectBlocks(t *testing.T) {
 	const warning = "Applications submitted without expected salary in resume may be excluded from consideration."
 	page := `<span data-automation="job-detail-title">UNIQUE-TITLE</span>
+<span data-automation="advertiser-name">COMPANY-TOKEN<svg><title>Verified</title></svg></span>
 <div data-automation="jobAdDetails">
   <p><strong>What you'll do:</strong></p>
   <ul><li>Design the API</li></ul>
@@ -576,7 +577,7 @@ func TestCollectBlocks(t *testing.T) {
 		t.Fatalf("blocks = %#v", got)
 	}
 	blob := join(got)
-	if strings.Contains(blob, "UNIQUE-TITLE") || strings.Contains(blob, warning) || strings.Contains(blob, "example.com") {
+	if strings.Contains(blob, "UNIQUE-TITLE") || strings.Contains(blob, "COMPANY-TOKEN") || strings.Contains(blob, "Verified") || strings.Contains(blob, warning) || strings.Contains(blob, "example.com") {
 		t.Fatalf("collected header, warning, or email: %s", blob)
 	}
 
@@ -608,7 +609,7 @@ func TestCollectBlocksMatchPhraseItems(t *testing.T) {
 	counts := map[string]int{}
 	for _, block := range blocks {
 		counts[block.Text]++
-		if strings.Contains(block.Text, doc.Header.TitleBlock) || strings.Contains(block.Heading, doc.Header.TitleBlock) {
+		if strings.Contains(block.Text, doc.Header.TitleBlock) || strings.Contains(block.Heading, doc.Header.TitleBlock) || strings.Contains(block.Text, doc.Header.Company) || strings.Contains(block.Heading, doc.Header.Company) || strings.Contains(block.Text, "Verified") || strings.Contains(block.Text, "View all jobs") {
 			t.Fatalf("header sent in block %#v", block)
 		}
 	}
@@ -629,6 +630,7 @@ func phraseDoc() Document {
 		Source: "asset/SA_jobs.html",
 		Header: Header{
 			TitleBlock:     "UNIQUE-TITLE",
+			Company:        "COMPANY-TOKEN",
 			Location:       "Kwun Tong District",
 			WorkType:       "Full time",
 			Classification: "Business/Systems Analysts",
@@ -706,7 +708,7 @@ func testGeminiClient(t *testing.T, status int, response string) (*http.Client, 
 	return client, cap
 }
 
-func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block, title string) {
+func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block, header Header) {
 	t.Helper()
 	u, err := url.Parse(cap.url)
 	if err != nil {
@@ -732,7 +734,7 @@ func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block
 			t.Fatalf("key in header %s", name)
 		}
 	}
-	if strings.Contains(cap.body, title) || strings.Contains(cap.body, "Kwun Tong") {
+	if strings.Contains(cap.body, header.TitleBlock) || strings.Contains(cap.body, header.Company) || strings.Contains(cap.body, "Kwun Tong") {
 		t.Fatalf("header text was sent: %s", cap.body)
 	}
 	var req struct {
@@ -765,6 +767,9 @@ func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block
 	}
 	if _, ok := req.GenerationConfig.ResponseSchema.Properties["offer"]; ok {
 		t.Fatalf("schema still has offer: %s", cap.body)
+	}
+	if _, ok := req.GenerationConfig.ResponseSchema.Properties["company"]; ok {
+		t.Fatalf("schema has company: %s", cap.body)
 	}
 	for _, block := range blocks {
 		if !strings.Contains(cap.body, block.Text) || !strings.Contains(cap.body, block.Heading) {
