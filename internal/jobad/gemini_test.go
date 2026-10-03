@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -165,10 +166,10 @@ func TestMapSectionsAcceptsExactPartition(t *testing.T) {
 	if got.Source != fallback.Source || got.Header != fallback.Header {
 		t.Fatalf("header or source changed: %#v", got)
 	}
-	if join(got.Offer) != "" || join(got.Duties) != "Medical insurance" || join(got.Requirements) != "Degree holder" || join(got.Trailer) != "" {
+	if join(got.Benefits) != "" || join(got.Duties) != "Medical insurance" || join(got.Requirements) != "Degree holder" || join(got.Trailer) != "" {
 		t.Fatalf("sections = %#v", got)
 	}
-	if got.Offer == nil || got.Trailer == nil {
+	if got.Benefits == nil || got.Trailer == nil {
 		t.Fatal("accepted empty section is nil")
 	}
 	assertGeminiRequest(t, cap, key, blocks, fallback.Header.TitleBlock)
@@ -191,7 +192,7 @@ func TestMapSectionsRejectsInexactReply(t *testing.T) {
 		{
 			name:     "rewrite",
 			status:   http.StatusOK,
-			response: geminiEnvelope(t, sectionMapping{Offer: []string{"Medical insurance coverage"}, Requirements: []string{"Degree holder"}}),
+			response: geminiEnvelope(t, sectionMapping{Benefits: []string{"Medical insurance coverage"}, Requirements: []string{"Degree holder"}}),
 			want: "docs-cli: gemini mapping rejected: partition\n" +
 				"docs-cli: gemini mapping rejected: sent=2 reply=2 missing=1 extra=1\n" +
 				"docs-cli: gemini mapping rejected: missing: Medical insurance\n" +
@@ -200,7 +201,7 @@ func TestMapSectionsRejectsInexactReply(t *testing.T) {
 		{
 			name:     "extra",
 			status:   http.StatusOK,
-			response: geminiEnvelope(t, sectionMapping{Offer: []string{"Medical insurance"}, Requirements: []string{"Degree holder"}, Trailer: []string{"Invented line"}}),
+			response: geminiEnvelope(t, sectionMapping{Benefits: []string{"Medical insurance"}, Requirements: []string{"Degree holder"}, Trailer: []string{"Invented line"}}),
 			want: "docs-cli: gemini mapping rejected: partition\n" +
 				"docs-cli: gemini mapping rejected: sent=2 reply=3 missing=0 extra=1\n" +
 				"docs-cli: gemini mapping rejected: extra: Invented line",
@@ -208,7 +209,7 @@ func TestMapSectionsRejectsInexactReply(t *testing.T) {
 		{
 			name:     "missing",
 			status:   http.StatusOK,
-			response: geminiEnvelope(t, sectionMapping{Offer: []string{"Medical insurance"}}),
+			response: geminiEnvelope(t, sectionMapping{Benefits: []string{"Medical insurance"}}),
 			want: "docs-cli: gemini mapping rejected: partition\n" +
 				"docs-cli: gemini mapping rejected: sent=2 reply=1 missing=1 extra=0\n" +
 				"docs-cli: gemini mapping rejected: missing: Degree holder",
@@ -262,8 +263,8 @@ func TestMapSectionsPartitionSamples(t *testing.T) {
 		{Text: "Keep five"},
 	}
 	mapped := sectionMapping{
-		Offer:  []string{spaced, long},
-		Duties: []string{"Fifth extra", "Sixth extra"},
+		Benefits: []string{spaced, long},
+		Duties:   []string{"Fifth extra", "Sixth extra"},
 	}
 	cleanKeyring(t)
 	if err := StoreGeminiKey(key); err != nil {
@@ -298,7 +299,7 @@ func TestMapSectionsPartitionSamples(t *testing.T) {
 			t.Fatal(err)
 		}
 		keyBlocks := []Block{{Text: key}, {Text: "Visible missing"}}
-		reply := sectionMapping{Offer: []string{key + " tail", "Other extra"}}
+		reply := sectionMapping{Benefits: []string{key + " tail", "Other extra"}}
 		client, _ := testGeminiClient(t, http.StatusOK, geminiEnvelope(t, reply))
 		_, err := MapSections(context.Background(), fallback, keyBlocks, client)
 		want := "docs-cli: gemini mapping rejected: partition\n" +
@@ -319,7 +320,7 @@ func TestMapSectionsPartitionSamples(t *testing.T) {
 			t.Fatal(err)
 		}
 		dup := []Block{{Text: "Medical insurance"}, {Text: "Medical insurance"}}
-		reply := sectionMapping{Offer: []string{"Medical insurance"}}
+		reply := sectionMapping{Benefits: []string{"Medical insurance"}}
 		client, _ := testGeminiClient(t, http.StatusOK, geminiEnvelope(t, reply))
 		_, err := MapSections(context.Background(), fallback, dup, client)
 		want := "docs-cli: gemini mapping rejected: partition\n" +
@@ -517,7 +518,7 @@ func TestMapSectionsNoKeySkipsHTTP(t *testing.T) {
 	if !errors.Is(err, keyring.ErrNotFound) || hits != 0 {
 		t.Fatalf("err %v hits %d", err, hits)
 	}
-	if got.Header != fallback.Header || join(got.Offer) != join(fallback.Offer) {
+	if got.Header != fallback.Header || join(got.Benefits) != join(fallback.Benefits) {
 		t.Fatalf("fallback changed: %#v", got)
 	}
 }
@@ -540,7 +541,7 @@ func TestMapSectionsCancelledContext(t *testing.T) {
 	if strings.Contains(err.Error(), "canceled") || strings.Contains(err.Error(), "context") {
 		t.Fatalf("transport text leaked: %v", err)
 	}
-	if join(got.Offer) != join(fallback.Offer) || got.Header != fallback.Header {
+	if join(got.Benefits) != join(fallback.Benefits) || got.Header != fallback.Header {
 		t.Fatalf("phrase result replaced: %#v", got)
 	}
 }
@@ -601,8 +602,8 @@ func TestCollectBlocksMatchPhraseItems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(blocks) != len(doc.Offer)+len(doc.Duties)+len(doc.Requirements)+len(doc.Trailer) {
-		t.Fatalf("blocks %d phrase items %d+%d+%d+%d", len(blocks), len(doc.Offer), len(doc.Duties), len(doc.Requirements), len(doc.Trailer))
+	if len(blocks) != len(doc.Benefits)+len(doc.Duties)+len(doc.Requirements)+len(doc.Trailer) {
+		t.Fatalf("blocks %d phrase items %d+%d+%d+%d", len(blocks), len(doc.Benefits), len(doc.Duties), len(doc.Requirements), len(doc.Trailer))
 	}
 	counts := map[string]int{}
 	for _, block := range blocks {
@@ -611,7 +612,7 @@ func TestCollectBlocksMatchPhraseItems(t *testing.T) {
 			t.Fatalf("header sent in block %#v", block)
 		}
 	}
-	for _, item := range append(append(append(doc.Offer, doc.Duties...), doc.Requirements...), doc.Trailer...) {
+	for _, item := range append(append(append(doc.Benefits, doc.Duties...), doc.Requirements...), doc.Trailer...) {
 		counts[item]--
 		if counts[item] < 0 {
 			t.Fatalf("phrase item missing from blocks: %q", item)
@@ -632,7 +633,7 @@ func phraseDoc() Document {
 			WorkType:       "Full time",
 			Classification: "Business/Systems Analysts",
 		},
-		Offer:        []string{"Medical insurance"},
+		Benefits:     []string{"Medical insurance"},
 		Duties:       []string{},
 		Requirements: []string{"Degree holder"},
 		Trailer:      []string{},
@@ -734,6 +735,37 @@ func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block
 	if strings.Contains(cap.body, title) || strings.Contains(cap.body, "Kwun Tong") {
 		t.Fatalf("header text was sent: %s", cap.body)
 	}
+	var req struct {
+		Contents []struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"contents"`
+		GenerationConfig struct {
+			ResponseSchema struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+				Required   []string                   `json:"required"`
+			} `json:"response_schema"`
+		} `json:"generationConfig"`
+	}
+	if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || !strings.HasPrefix(req.Contents[0].Parts[0].Text, "Split these job-ad blocks into benefits, duties, requirements, and trailer.\n") {
+		t.Fatalf("prompt: %s", cap.body)
+	}
+	wantRequired := []string{"benefits", "duties", "requirements", "trailer"}
+	if !slices.Equal(req.GenerationConfig.ResponseSchema.Required, wantRequired) {
+		t.Fatalf("schema required: %#v", req.GenerationConfig.ResponseSchema.Required)
+	}
+	for _, key := range wantRequired {
+		if _, ok := req.GenerationConfig.ResponseSchema.Properties[key]; !ok {
+			t.Fatalf("schema missing %s: %s", key, cap.body)
+		}
+	}
+	if _, ok := req.GenerationConfig.ResponseSchema.Properties["offer"]; ok {
+		t.Fatalf("schema still has offer: %s", cap.body)
+	}
 	for _, block := range blocks {
 		if !strings.Contains(cap.body, block.Text) || !strings.Contains(cap.body, block.Heading) {
 			t.Fatalf("body missing block %#v", block)
@@ -743,7 +775,7 @@ func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block
 
 func assertPhraseKept(t *testing.T, got, fallback Document) {
 	t.Helper()
-	if join(got.Offer) != join(fallback.Offer) || join(got.Duties) != join(fallback.Duties) || join(got.Requirements) != join(fallback.Requirements) || join(got.Trailer) != join(fallback.Trailer) {
+	if join(got.Benefits) != join(fallback.Benefits) || join(got.Duties) != join(fallback.Duties) || join(got.Requirements) != join(fallback.Requirements) || join(got.Trailer) != join(fallback.Trailer) {
 		t.Fatalf("phrase result replaced: %#v", got)
 	}
 	if got.Header != fallback.Header || got.Source != fallback.Source {

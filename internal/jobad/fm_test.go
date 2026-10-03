@@ -168,7 +168,7 @@ func sampleAnalysisDoc() Document {
 			WorkType:       "WORKTYPE-TOKEN",
 			Classification: "CLASS-TOKEN",
 		},
-		Offer:        []string{"Medical person@example.com"},
+		Benefits:     []string{"Medical person@example.com"},
 		Duties:       []string{},
 		Requirements: []string{"Know Go", "React (For Frontend)"},
 		Trailer:      []string{"TRAILER-SENTINEL"},

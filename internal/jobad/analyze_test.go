@@ -10,7 +10,7 @@ import (
 func TestPromptLabels(t *testing.T) {
 	doc := Document{
 		Header:       Header{TitleBlock: "System Analyst"},
-		Offer:        []string{"Medical"},
+		Benefits:     []string{"Medical"},
 		Duties:       nil,
 		Requirements: []string{"Know Go", "React (For Frontend)"},
 	}
@@ -18,11 +18,11 @@ func TestPromptLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "Title:\nSystem Analyst\n\nOffer:\n- Medical\n\nDuties:\n(none)\n\nRequirements:\n- Know Go\n- React (For Frontend)\n"
+	want := "Title:\nSystem Analyst\n\nBenefits:\n- Medical\n\nDuties:\n(none)\n\nRequirements:\n- Know Go\n- React (For Frontend)\n"
 	if got != want {
 		t.Fatalf("prompt =\n%s\nwant =\n%s", got, want)
 	}
-	order := []string{"Title:\n", "Offer:\n", "Duties:\n", "Requirements:\n"}
+	order := []string{"Title:\n", "Benefits:\n", "Duties:\n", "Requirements:\n"}
 	at := 0
 	for _, label := range order {
 		i := strings.Index(got, label)
@@ -32,17 +32,17 @@ func TestPromptLabels(t *testing.T) {
 		at = i + len(label)
 	}
 
-	emptyOffer := doc
-	emptyOffer.Offer = []string{}
-	emptyOffer.Duties = []string{"Build services"}
-	emptyOffer.Requirements = []string{"Know Go"}
-	got, err = PromptText(emptyOffer)
+	emptyBenefits := doc
+	emptyBenefits.Benefits = []string{}
+	emptyBenefits.Duties = []string{"Build services"}
+	emptyBenefits.Requirements = []string{"Know Go"}
+	got, err = PromptText(emptyBenefits)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = "Title:\nSystem Analyst\n\nOffer:\n(none)\n\nDuties:\n- Build services\n\nRequirements:\n- Know Go\n"
+	want = "Title:\nSystem Analyst\n\nBenefits:\n(none)\n\nDuties:\n- Build services\n\nRequirements:\n- Know Go\n"
 	if got != want {
-		t.Fatalf("empty offer =\n%s\nwant =\n%s", got, want)
+		t.Fatalf("empty benefits =\n%s\nwant =\n%s", got, want)
 	}
 }
 
@@ -55,7 +55,7 @@ func TestPromptOmitsTrailer(t *testing.T) {
 			WorkType:       "WORKTYPE-TOKEN",
 			Classification: "CLASS-TOKEN",
 		},
-		Offer:        []string{"Medical person@example.com cover"},
+		Benefits:     []string{"Medical person@example.com cover"},
 		Duties:       []string{"Build services"},
 		Requirements: []string{"Know Go person@example.com"},
 		Trailer:      []string{"TRAILER-SENTINEL", "hidden@example.com"},
@@ -114,6 +114,7 @@ func TestAnalysisAcceptsNullYears(t *testing.T) {
 		t.Fatalf("schema required = %#v", schema["required"])
 	}
 	for _, phrase := range []string{
+		"Benefits and Duties are for comparison only",
 		"Requirements",
 		"must_have",
 		"advantage",
