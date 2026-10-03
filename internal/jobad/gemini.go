@@ -22,8 +22,8 @@ const (
 	keyringService = "docs-cli"
 	geminiAccount  = "gemini-api-key"
 
-	// geminiModel is the stable Gemini Flash id in the Gemini API models guide.
-	geminiModel = "gemini-3.7-flash"
+	// geminiModel is the Gemini API model id for section mapping.
+	geminiModel = "gemini-3.1-flash-lite"
 	geminiURL   = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel + ":generateContent"
 
 	geminiTimeout        = 60 * time.Second

@@ -9,3 +9,6 @@ token.json
 .env.*.tmp
 credentials.json.*.tmp
 token.json.*.tmp
+*.html
+/tmp
+*.pdf
