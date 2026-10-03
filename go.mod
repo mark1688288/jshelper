@@ -3,6 +3,7 @@ module github.com/mark1688288/jshelper
 go 1.27.1
 
 require (
+	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
 	github.com/zalando/go-keyring v0.2.9-0.20260724212736-66b55cc0c51c
 	golang.org/x/net v0.59.0
 	golang.org/x/oauth2 v0.37.0
