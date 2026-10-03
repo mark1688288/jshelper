@@ -2,6 +2,7 @@
 package jobad
 
 import (
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -14,10 +15,11 @@ import (
 var ErrJobAdDetailsNotFound = errors.New("jobad: jobAdDetails not found")
 
 // Document is the extraction JSON. Source stays empty; the CLI fills it.
+// A legacy "offer" key is not read. Missing benefits decodes as an empty slice.
 type Document struct {
 	Source       string   `json:"source"`
 	Header       Header   `json:"header"`
-	Offer        []string `json:"offer"`
+	Benefits     []string `json:"benefits"`
 	Duties       []string `json:"duties"`
 	Requirements []string `json:"requirements"`
 	Trailer      []string `json:"trailer"`
@@ -32,7 +34,7 @@ type Header struct {
 }
 
 const (
-	sectionOffer        = "offer"
+	sectionBenefits     = "benefits"
 	sectionDuties       = "duties"
 	sectionRequirements = "requirements"
 	sectionTrailer      = "trailer"
@@ -49,6 +51,20 @@ const (
 // Local part is either an ordinary mailbox or a mask of bullets, stars, or dots.
 var emailRE = regexp.MustCompile(`(?i)(?:[A-Za-z0-9._%+\-]+|[•*.]{2,})@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
 
+// UnmarshalJSON ignores a legacy offer key. Missing benefits becomes [].
+func (d *Document) UnmarshalJSON(data []byte) error {
+	type plain Document
+	var raw plain
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.Benefits == nil {
+		raw.Benefits = []string{}
+	}
+	*d = Document(raw)
+	return nil
+}
+
 // Parse builds a Document from a JobsDB HTML page.
 // Lists are empty slices, never nil. Source is left empty.
 func Parse(page []byte) (Document, error) {
@@ -57,7 +73,7 @@ func Parse(page []byte) (Document, error) {
 		return Document{}, err
 	}
 	doc := Document{
-		Offer:        []string{},
+		Benefits:     []string{},
 		Duties:       []string{},
 		Requirements: []string{},
 		Trailer:      []string{},
@@ -97,7 +113,7 @@ func walk(n *html.Node, section string, doc *Document) string {
 			return section
 		case "li":
 			switch section {
-			case sectionOffer, sectionDuties, sectionRequirements:
+			case sectionBenefits, sectionDuties, sectionRequirements:
 				add(doc, section, textOf(n))
 			case sectionGap:
 				add(doc, sectionTrailer, textOf(n))
@@ -187,14 +203,14 @@ func containsStrongWithin(n *html.Node, gapRunes int) bool {
 	return false
 }
 
-// classify expects normalizeHeading output. Offer exact, then duties, then requirements.
+// classify expects normalizeHeading output. Benefits exact, then duties, then requirements.
 // Duties is an exact phrase, or any strings.Fields token equal to responsibilities.
 // That token is a whole word, so irresponsibilities and responsibility do not match.
 // It is checked before requirements phrases, so both in one heading stay duties.
 func classify(norm string) (string, bool) {
 	switch norm {
 	case "what do we offer", "what we offer", "what you'll get", "what you will get":
-		return sectionOffer, true
+		return sectionBenefits, true
 	case "job description", "what you'll do", "what you will do", "responsibilities",
 		"your responsibilities", "about the role", "the role", "工作內容", "職責":
 		return sectionDuties, true
@@ -248,8 +264,8 @@ func add(doc *Document, section, text string) {
 		return
 	}
 	switch section {
-	case sectionOffer:
-		doc.Offer = append(doc.Offer, text)
+	case sectionBenefits:
+		doc.Benefits = append(doc.Benefits, text)
 	case sectionDuties:
 		doc.Duties = append(doc.Duties, text)
 	case sectionRequirements:

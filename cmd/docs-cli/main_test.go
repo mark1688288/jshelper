@@ -1410,7 +1410,7 @@ func TestParsePromptsThenMaps(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
-		if got.Source != path || strings.Join(got.Duties, "|") != "Medical insurance|Build tools" || len(got.Offer) != 0 {
+		if got.Source != path || strings.Join(got.Duties, "|") != "Medical insurance|Build tools" || len(got.Benefits) != 0 {
 			t.Fatalf("doc %+v", got)
 		}
 		if strings.Contains(stdout.String(), `\u0026`) || got.Header.Classification != "ICT & Data" {
@@ -1461,7 +1461,7 @@ func TestParsePromptsThenMaps(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
-		if len(got.Offer) != 0 || strings.Join(got.Duties, "|") != "Medical insurance|Build tools" {
+		if len(got.Benefits) != 0 || strings.Join(got.Duties, "|") != "Medical insurance|Build tools" {
 			t.Fatalf("doc %+v", got)
 		}
 	})
@@ -1600,7 +1600,7 @@ func TestAnalyzeCommandFakeFM(t *testing.T) {
 			WorkType:       "WORKTYPE-TOKEN",
 			Classification: "CLASS-TOKEN",
 		},
-		Offer:        []string{"Medical person@example.com"},
+		Benefits:     []string{"Medical person@example.com"},
 		Duties:       []string{},
 		Requirements: []string{"Know Go", "React (For Frontend)"},
 		Trailer:      []string{"TRAILER-SENTINEL"},
@@ -1700,7 +1700,7 @@ func TestAnalyzeSkipsFMWhenRequirementsEmpty(t *testing.T) {
 	})
 	t.Cleanup(restoreFMStub)
 	docs := []jobad.Document{
-		{Requirements: []string{}, Offer: []string{"Medical"}, Trailer: []string{"TRAILER-SENTINEL"}},
+		{Requirements: []string{}, Benefits: []string{"Medical"}, Trailer: []string{"TRAILER-SENTINEL"}},
 		{Requirements: []string{"person@example.com"}},
 		{},
 	}
@@ -2036,10 +2036,10 @@ func mappingClient(t *testing.T, status int, response string, cap *geminiCapture
 	})}
 }
 
-func geminiReply(t *testing.T, offer, duties, requirements, trailer []string) string {
+func geminiReply(t *testing.T, benefits, duties, requirements, trailer []string) string {
 	t.Helper()
 	inner, err := json.Marshal(map[string][]string{
-		"offer":        emptyStrings(offer),
+		"benefits":     emptyStrings(benefits),
 		"duties":       emptyStrings(duties),
 		"requirements": emptyStrings(requirements),
 		"trailer":      emptyStrings(trailer),

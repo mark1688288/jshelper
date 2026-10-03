@@ -22,8 +22,8 @@ var ErrRequirementsEmpty = errors.New("docs-cli: requirements is empty")
 var ErrAnalysisSchema = errors.New("docs-cli: fm output is not the analysis schema")
 
 // AnalysisInstructions is the fm --instructions argument.
-// Offer and duties are context only. Requirements are the hiring conditions.
-const AnalysisInstructions = `Treat only the Requirements section as hiring conditions. Offer and Duties are for comparison only and must not be written into must_have or advantage. Put a parenthetical condition, such as "For Frontend", in that technology item's applies_to. Put "will be an advantage" and "familiar with" in advantage. Put degree, minimum years of experience, languages, and soft skills in their own fields. When no years of experience are stated, min_years is null. Each tech.level must be "must" or "advantage".`
+// Benefits and duties are context only. Requirements are the hiring conditions.
+const AnalysisInstructions = `Treat only the Requirements section as hiring conditions. Benefits and Duties are for comparison only and must not be written into must_have or advantage. Put a parenthetical condition, such as "For Frontend", in that technology item's applies_to. Put "will be an advantage" and "familiar with" in advantage. Put degree, minimum years of experience, languages, and soft skills in their own fields. When no years of experience are stated, min_years is null. Each tech.level must be "must" or "advantage".`
 
 // AnalysisSchema is the fm --schema argument: the workflow schema as one JSON value.
 const AnalysisSchema = `{"type":"object","properties":{"must_have":{"type":"array","items":{"type":"string"}},"advantage":{"type":"array","items":{"type":"string"}},"min_years":{"type":["integer","null"]},"degree":{"type":["string","null"]},"languages":{"type":"array","items":{"type":"string"}},"tech":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"level":{"type":"string"},"applies_to":{"type":["string","null"]}},"required":["name","level","applies_to"]}},"soft_skills":{"type":"array","items":{"type":"string"}}},"required":["must_have","advantage","min_years","degree","languages","tech","soft_skills"]}`
@@ -67,7 +67,7 @@ func PromptText(doc Document) (string, error) {
 	}
 	var b strings.Builder
 	writeBlock(&b, "Title:", redact(doc.Header.TitleBlock))
-	writeBlock(&b, "Offer:", listBody(promptLines(doc.Offer)))
+	writeBlock(&b, "Benefits:", listBody(promptLines(doc.Benefits)))
 	writeBlock(&b, "Duties:", listBody(promptLines(doc.Duties)))
 	writeBlock(&b, "Requirements:", listBody(requirements))
 	return b.String(), nil

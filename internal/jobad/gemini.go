@@ -66,7 +66,7 @@ type Block struct {
 }
 
 type sectionMapping struct {
-	Offer        []string `json:"offer"`
+	Benefits     []string `json:"benefits"`
 	Duties       []string `json:"duties"`
 	Requirements []string `json:"requirements"`
 	Trailer      []string `json:"trailer"`
@@ -219,7 +219,7 @@ func MapSections(ctx context.Context, fallback Document, blocks []Block, client 
 	if !partitionOK(blocks, mapped) {
 		return fallback, partitionRejectError(key, blocks, mapped)
 	}
-	fallback.Offer = cloneStrings(mapped.Offer)
+	fallback.Benefits = cloneStrings(mapped.Benefits)
 	fallback.Duties = cloneStrings(mapped.Duties)
 	fallback.Requirements = cloneStrings(mapped.Requirements)
 	fallback.Trailer = cloneStrings(mapped.Trailer)
@@ -335,12 +335,12 @@ func geminiRequestBody(prompt string) ([]byte, error) {
 	schema := json.RawMessage(`{
 		"type": "OBJECT",
 		"properties": {
-			"offer": {"type": "ARRAY", "items": {"type": "STRING"}},
+			"benefits": {"type": "ARRAY", "items": {"type": "STRING"}},
 			"duties": {"type": "ARRAY", "items": {"type": "STRING"}},
 			"requirements": {"type": "ARRAY", "items": {"type": "STRING"}},
 			"trailer": {"type": "ARRAY", "items": {"type": "STRING"}}
 		},
-		"required": ["offer", "duties", "requirements", "trailer"]
+		"required": ["benefits", "duties", "requirements", "trailer"]
 	}`)
 	body := map[string]any{
 		"contents": []any{
@@ -359,7 +359,7 @@ func geminiRequestBody(prompt string) ([]byte, error) {
 
 func mappingPrompt(blocks []Block) string {
 	var b strings.Builder
-	b.WriteString("Split these job-ad blocks into offer, duties, requirements, and trailer.\n")
+	b.WriteString("Split these job-ad blocks into benefits, duties, requirements, and trailer.\n")
 	b.WriteString("Copy each block text exactly once into one array. Do not add, drop, merge, or rewrite a block.\n")
 	b.WriteString("Headings are context only and are not blocks.\n\n")
 	for _, block := range blocks {
@@ -410,7 +410,7 @@ func partitionOK(blocks []Block, mapped sectionMapping) bool {
 	}
 	got := map[string]int{}
 	n := 0
-	for _, items := range [][]string{mapped.Offer, mapped.Duties, mapped.Requirements, mapped.Trailer} {
+	for _, items := range [][]string{mapped.Benefits, mapped.Duties, mapped.Requirements, mapped.Trailer} {
 		for _, item := range items {
 			got[item]++
 			n++
@@ -435,7 +435,7 @@ func partitionRejectError(key string, blocks []Block, mapped sectionMapping) err
 	replyCount := map[string]int{}
 	replyN := 0
 	var replyOrder []string
-	for _, items := range [][]string{mapped.Offer, mapped.Duties, mapped.Requirements, mapped.Trailer} {
+	for _, items := range [][]string{mapped.Benefits, mapped.Duties, mapped.Requirements, mapped.Trailer} {
 		for _, item := range items {
 			replyCount[item]++
 			replyOrder = append(replyOrder, item)

@@ -31,8 +31,8 @@ func TestParseJobsDBSections(t *testing.T) {
 	if doc.Header.Classification != "Business/Systems Analysts (Information & Communication Technology)" {
 		t.Fatalf("classification = %q", doc.Header.Classification)
 	}
-	if len(doc.Offer) != 6 || len(doc.Duties) != 7 || len(doc.Requirements) != 10 || len(doc.Trailer) != 2 {
-		t.Fatalf("lens offer=%d duties=%d requirements=%d trailer=%d", len(doc.Offer), len(doc.Duties), len(doc.Requirements), len(doc.Trailer))
+	if len(doc.Benefits) != 6 || len(doc.Duties) != 7 || len(doc.Requirements) != 10 || len(doc.Trailer) != 2 {
+		t.Fatalf("lens benefits=%d duties=%d requirements=%d trailer=%d", len(doc.Benefits), len(doc.Duties), len(doc.Requirements), len(doc.Trailer))
 	}
 	if !strings.Contains(strings.Join(doc.Requirements, "\n"), "(For Frontend)") {
 		t.Fatal("requirements missing (For Frontend)")
@@ -49,13 +49,44 @@ func TestParseJobsDBSections(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := marshal(t, empty)
-	for _, key := range []string{`"offer"`, `"duties"`, `"requirements"`, `"trailer"`} {
+	for _, key := range []string{`"benefits"`, `"duties"`, `"requirements"`, `"trailer"`} {
 		if !bytes.Contains(raw, []byte(key+`: []`)) {
 			t.Fatalf("empty document JSON missing %s: []\n%s", key, raw)
 		}
 	}
 	if bytes.Contains(raw, []byte("null")) {
 		t.Fatalf("empty document encoded null:\n%s", raw)
+	}
+	if bytes.Contains(raw, []byte(`"offer"`)) {
+		t.Fatalf("empty document still has offer:\n%s", raw)
+	}
+	order := []string{`"source"`, `"header"`, `"benefits"`, `"duties"`, `"requirements"`, `"trailer"`}
+	at := 0
+	for _, key := range order {
+		i := bytes.Index(raw, []byte(key))
+		if i < at {
+			t.Fatalf("key %s out of order:\n%s", key, raw)
+		}
+		at = i + len(key)
+	}
+	if !strings.Contains(strings.Join(doc.Trailer, "\n"), "fringe benefits") {
+		t.Fatalf("fringe benefits left trailer: %#v", doc.Trailer)
+	}
+	var legacy Document
+	if err := json.Unmarshal([]byte(`{"offer":["Medical cover"]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Benefits == nil || len(legacy.Benefits) != 0 {
+		t.Fatalf("offer filled benefits: %#v", legacy.Benefits)
+	}
+	if again := marshal(t, legacy); !bytes.Contains(again, []byte(`"benefits": []`)) || bytes.Contains(again, []byte("Medical cover")) {
+		t.Fatalf("legacy benefits JSON:\n%s", again)
+	}
+	if err := json.Unmarshal([]byte(`{"benefits":["Kept"],"offer":["Old"]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(legacy.Benefits, "|") != "Kept" {
+		t.Fatalf("offer alias changed benefits: %#v", legacy.Benefits)
 	}
 }
 
@@ -107,7 +138,7 @@ func TestParseOmitsSalaryWarning(t *testing.T) {
 	if strings.Contains(blob, warning) {
 		t.Fatalf("salary warning was kept:\n%s", blob)
 	}
-	joined := strings.Join(append(append(append(doc.Offer, doc.Duties...), doc.Requirements...), doc.Trailer...), "\n")
+	joined := strings.Join(append(append(append(doc.Benefits, doc.Duties...), doc.Requirements...), doc.Trailer...), "\n")
 	if strings.Contains(joined, warning) {
 		t.Fatalf("salary warning in sections: %s", joined)
 	}
@@ -130,8 +161,8 @@ func TestParseFriendlyHeadings(t *testing.T) {
 	if got, want := strings.Join(doc.Duties, "|"), "Design the API"; got != want {
 		t.Fatalf("duties = %q", got)
 	}
-	if len(doc.Offer) != 0 || len(doc.Trailer) != 0 {
-		t.Fatalf("offer = %#v trailer = %#v", doc.Offer, doc.Trailer)
+	if len(doc.Benefits) != 0 || len(doc.Trailer) != 0 {
+		t.Fatalf("benefits = %#v trailer = %#v", doc.Benefits, doc.Trailer)
 	}
 }
 
@@ -154,8 +185,8 @@ func TestParseKeyResponsibilitiesAreDuties(t *testing.T) {
 	if got, want := strings.Join(doc.Trailer, "|"), "We share context openly"; got != want {
 		t.Fatalf("trailer = %q", got)
 	}
-	if len(doc.Offer) != 0 || len(doc.Requirements) != 0 {
-		t.Fatalf("offer = %#v requirements = %#v", doc.Offer, doc.Requirements)
+	if len(doc.Benefits) != 0 || len(doc.Requirements) != 0 {
+		t.Fatalf("benefits = %#v requirements = %#v", doc.Benefits, doc.Requirements)
 	}
 }
 
@@ -226,7 +257,7 @@ func TestParseLongSalaryWarningIsNotAHeading(t *testing.T) {
 	if len(doc.Requirements) != 0 {
 		t.Fatalf("requirements = %#v", doc.Requirements)
 	}
-	blob := strings.Join(append(append(append(doc.Offer, doc.Duties...), doc.Requirements...), doc.Trailer...), "\n")
+	blob := strings.Join(append(append(append(doc.Benefits, doc.Duties...), doc.Requirements...), doc.Trailer...), "\n")
 	if strings.Contains(blob, warning) {
 		t.Fatalf("salary warning was kept: %s", blob)
 	}
@@ -296,8 +327,8 @@ func TestParseLongSubsectionLabelStaysInDuties(t *testing.T) {
 	if got, want := strings.Join(doc.Trailer, "|"), "We share context openly"; got != want {
 		t.Fatalf("trailer = %q", got)
 	}
-	if len(doc.Offer) != 0 || len(doc.Requirements) != 0 {
-		t.Fatalf("offer = %#v requirements = %#v", doc.Offer, doc.Requirements)
+	if len(doc.Benefits) != 0 || len(doc.Requirements) != 0 {
+		t.Fatalf("benefits = %#v requirements = %#v", doc.Benefits, doc.Requirements)
 	}
 	blob := strings.Join(append(doc.Duties, doc.Trailer...), "\n")
 	if strings.Contains(blob, mission) || strings.Contains(blob, label) {
@@ -372,8 +403,8 @@ func TestParseShortGapLabelsStillCutToTrailer(t *testing.T) {
 	if got, want := strings.Join(doc.Trailer, "|"), "Medical cover|Own the domain|A support rota|A small team"; got != want {
 		t.Fatalf("trailer = %q", got)
 	}
-	if len(doc.Requirements) != 0 {
-		t.Fatalf("requirements = %#v", doc.Requirements)
+	if len(doc.Benefits) != 0 || len(doc.Requirements) != 0 {
+		t.Fatalf("benefits = %#v requirements = %#v", doc.Benefits, doc.Requirements)
 	}
 }
 
@@ -387,7 +418,7 @@ func TestParseAboutTheRoleParagraphIsNotADuty(t *testing.T) {
 	if got, want := strings.Join(doc.Duties, "|"), "Own the service"; got != want {
 		t.Fatalf("duties = %q", got)
 	}
-	blob := strings.Join(append(append(append(doc.Offer, doc.Duties...), doc.Requirements...), doc.Trailer...), "\n")
+	blob := strings.Join(append(append(append(doc.Benefits, doc.Duties...), doc.Requirements...), doc.Trailer...), "\n")
 	if strings.Contains(blob, para) {
 		t.Fatalf("bare paragraph was kept: %s", blob)
 	}
