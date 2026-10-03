@@ -25,9 +25,10 @@ type Document struct {
 	Trailer      []string `json:"trailer"`
 }
 
-// Header is the visible text of the job-detail automation nodes.
+// Header is the visible text of the job-detail and advertiser-name nodes.
 type Header struct {
 	TitleBlock     string `json:"title_block"`
+	Company        string `json:"company"`
 	Location       string `json:"location"`
 	WorkType       string `json:"work_type"`
 	Classification string `json:"classification"`
@@ -80,6 +81,7 @@ func Parse(page []byte) (Document, error) {
 	}
 	doc.Header = Header{
 		TitleBlock:     textOf(findAutomation(root, "job-detail-title")),
+		Company:        textOf(findAutomation(root, "advertiser-name")),
 		Location:       textOf(findAutomation(root, "job-detail-location")),
 		WorkType:       textOf(findAutomation(root, "job-detail-work-type")),
 		Classification: textOf(findAutomation(root, "job-detail-classifications")),
@@ -95,6 +97,7 @@ func Parse(page []byte) (Document, error) {
 
 func redactHeader(h *Header) {
 	h.TitleBlock = redact(h.TitleBlock)
+	h.Company = redact(h.Company)
 	h.Location = redact(h.Location)
 	h.WorkType = redact(h.WorkType)
 	h.Classification = redact(h.Classification)

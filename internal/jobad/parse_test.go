@@ -16,8 +16,11 @@ func TestParseJobsDBSections(t *testing.T) {
 	if doc.Source != "" {
 		t.Fatalf("source = %q, want empty", doc.Source)
 	}
-	if doc.Header.TitleBlock != "System Analyst (Java/Web Frontend/.Net Core) Nexify Limited" {
+	if doc.Header.TitleBlock != "System Analyst (Java/Web Frontend/.Net Core)" {
 		t.Fatalf("title_block = %q", doc.Header.TitleBlock)
+	}
+	if doc.Header.Company != "Nexify Limited" {
+		t.Fatalf("company = %q", doc.Header.Company)
 	}
 	if doc.Header.Location != "Kwun Tong District" {
 		t.Fatalf("location = %q", doc.Header.Location)
@@ -69,6 +72,18 @@ func TestParseJobsDBSections(t *testing.T) {
 		}
 		at = i + len(key)
 	}
+	headerOrder := []string{`"title_block"`, `"company"`, `"location"`, `"work_type"`, `"classification"`}
+	at = 0
+	for _, key := range headerOrder {
+		i := bytes.Index(raw, []byte(key))
+		if i < at {
+			t.Fatalf("header key %s out of order:\n%s", key, raw)
+		}
+		at = i + len(key)
+	}
+	if !bytes.Contains(raw, []byte(`"company": ""`)) {
+		t.Fatalf("empty company omitted:\n%s", raw)
+	}
 	if !strings.Contains(strings.Join(doc.Trailer, "\n"), "fringe benefits") {
 		t.Fatalf("fringe benefits left trailer: %#v", doc.Trailer)
 	}
@@ -93,13 +108,55 @@ func TestParseJobsDBSections(t *testing.T) {
 func TestParseSkipsScriptSVGAttributesAndSiblingIcons(t *testing.T) {
 	doc := parseFixture(t)
 	blob := string(marshal(t, doc))
-	for _, leak := range []string{"SHOULD-NOT-LEAK", "loginId", "person@example.com", "mailto:", "Salary", "Industry"} {
+	for _, leak := range []string{"SHOULD-NOT-LEAK", "loginId", "person@example.com", "mailto:", "Salary", "Industry", "Verified", "View all jobs"} {
 		if strings.Contains(blob, leak) {
 			t.Fatalf("JSON contains %q\n%s", leak, blob)
 		}
 	}
 	if doc.Header.WorkType != "Full time" {
 		t.Fatalf("work_type = %q", doc.Header.WorkType)
+	}
+}
+
+func TestParseCompanyFromAdvertiserName(t *testing.T) {
+	doc := parseHTML(t, `<span data-automation="job-detail-title">Role</span>
+<span data-automation="advertiser-name">Nexify Limited<span><svg><title>Verified</title></svg></span></span>
+<a data-automation="job-details-header-more-jobs">View all jobs</a>
+<span data-automation="advertiser-name">Other Co</span>
+<div data-automation="company-profile"><h4>Short Name</h4></div>
+<script>window.SK_DL = {"companyName":"SK Name"};</script>
+<div data-automation="jobAdDetails"></div>`)
+	if doc.Header.TitleBlock != "Role" {
+		t.Fatalf("title_block = %q", doc.Header.TitleBlock)
+	}
+	if doc.Header.Company != "Nexify Limited" {
+		t.Fatalf("company = %q", doc.Header.Company)
+	}
+	blob := string(marshal(t, doc))
+	for _, leak := range []string{"Verified", "View all jobs", "Other Co", "Short Name", "SK Name", "companyName"} {
+		if strings.Contains(blob, leak) {
+			t.Fatalf("JSON contains %q\n%s", leak, blob)
+		}
+	}
+}
+
+func TestParseCompanyMissingIsEmpty(t *testing.T) {
+	doc := parseHTML(t, `<span data-automation="job-detail-title">Role</span><div data-automation="jobAdDetails"></div>`)
+	if doc.Header.TitleBlock != "Role" || doc.Header.Company != "" {
+		t.Fatalf("header = %#v", doc.Header)
+	}
+	if !bytes.Contains(marshal(t, doc), []byte(`"company": ""`)) {
+		t.Fatal("missing company was omitted")
+	}
+}
+
+func TestParseCompanyRedactsEmail(t *testing.T) {
+	doc := parseHTML(t, `<span data-automation="advertiser-name">Acme person@example.com Ltd ••••@example.com</span><div data-automation="jobAdDetails"></div>`)
+	if doc.Header.Company != "Acme Ltd" {
+		t.Fatalf("company = %q", doc.Header.Company)
+	}
+	if strings.Contains(string(marshal(t, doc)), "example.com") {
+		t.Fatalf("email left in JSON: %s", marshal(t, doc))
 	}
 }
 
