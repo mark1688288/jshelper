@@ -2,7 +2,9 @@ package jobad
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"net/http"
 	"os/exec"
 	"strings"
 )
@@ -64,15 +66,18 @@ func newFMError(stderr []byte) error {
 }
 
 // Analyze runs `fm available`, then `fm respond`, and parses stdout as Analysis.
-// It does not read files, the environment, or the Gemini API key.
-// An empty requirements list returns ErrRequirementsEmpty and does not run fm.
-func Analyze(doc Document) (Analysis, error) {
+// When either fm command exits non-zero and a Gemini API key is already stored,
+// Gemini writes the same Analysis. A successful fm run does not read that key.
+// A missing, unreadable, or invalid key keeps the fm error and does not call Gemini.
+// An empty requirements list returns ErrRequirementsEmpty and does not run either model.
+// client nil uses the default Gemini HTTP client. Tests pass a client that does not call Gemini.
+func Analyze(doc Document, client *http.Client) (Analysis, error) {
 	text, err := PromptText(doc)
 	if err != nil {
 		return Analysis{}, err
 	}
 	if _, err := callFM([]string{fmPath, "available"}); err != nil {
-		return Analysis{}, err
+		return analyzeWithGemini(text, client, err)
 	}
 	stdout, err := callFM([]string{
 		fmPath,
@@ -84,9 +89,17 @@ func Analyze(doc Document) (Analysis, error) {
 		"--text", text,
 	})
 	if err != nil {
-		return Analysis{}, err
+		return analyzeWithGemini(text, client, err)
 	}
 	return ParseAnalysis(stdout)
+}
+
+func analyzeWithGemini(text string, client *http.Client, fmErr error) (Analysis, error) {
+	key, err := LoadGeminiKey()
+	if err != nil {
+		return Analysis{}, fmErr
+	}
+	return requestAnalysis(context.Background(), client, key, text)
 }
 
 func callFM(argv []string) ([]byte, error) {

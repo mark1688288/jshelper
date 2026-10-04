@@ -141,7 +141,7 @@ Production `./docs-cli create` and `./docs-cli auth` use the same state machine 
 
 ## Job ads
 
-`parse` reads a saved job HTML file and writes section JSON to stdout. A JobsDB page still uses its job-detail fields. Another page uses the first schema.org JobPosting, or the page's paragraphs when that object is absent. It does not read `.env` and it does not use the refresh token.
+`parse` reads a saved job HTML file and writes section JSON to stdout. A JobsDB page still uses its job-detail fields. Another page uses the first schema.org JobPosting, or the page's paragraphs when that object is absent. When that page has no requirements, and a hidden `initialHistory` value holds the job HTML, `parse` uses that HTML. A `Post:` line fills the title. A heading that contains the word requirements fills the requirements list. It does not read `.env` and it does not use the refresh token.
 
 ```bash
 docs-cli parse --html PATH
@@ -155,13 +155,13 @@ docs-cli gemini-key
 
 On a terminal, `parse` asks for the key when that item is missing, then stores it. Without a key, `parse` keeps the local heading classification and does not call Gemini. When a key is stored, `parse` sends only the extracted plain text, with email addresses removed. It does not send the HTML page. `go test` does not call Gemini.
 
-`analyze` reads that section JSON and writes the requirement JSON to stdout. It needs macOS, Apple Intelligence, and `/usr/bin/fm`. A privileged user must already have run `sudo fm license` on that Mac. It does not read `.env` and it does not read the Gemini API key. `go test` does not run `/usr/bin/fm` and does not call Gemini.
+`analyze` reads that section JSON and writes the requirement JSON to stdout. It uses the on-device model when that model is available. If the on-device model is unavailable and a Gemini API key is already stored, Gemini writes the same analysis JSON. It does not read `.env`. `go test` does not run `/usr/bin/fm` and does not call Gemini.
 
 ```bash
 docs-cli analyze --json PATH
 ```
 
-An empty requirements list exits 1 with `docs-cli: requirements is empty` and does not run `fm`.
+An empty requirements list exits 1 with `docs-cli: requirements is empty` and does not run `fm` or Gemini.
 
 `draft` reads a cover-letter template PDF and the section JSON from `parse`, then writes a letter with the on-device model. The template is a pattern for structure and voice. The on-device model drafts the whole letter from the job JSON and the template's structure and voice without copying square-bracket placeholders, and the program does not fill those placeholders afterward. The letter keeps the template's breaks: a blank line stays a blank line, and a single newline stays a single newline. The program trims trailing spaces and drops a line that is only a square-bracket placeholder. It needs macOS, Apple Intelligence, and `/usr/bin/fm`. A privileged user must already have run `sudo fm license` on that Mac. The letter is saved in a `drafts` directory in the working directory. Run from the repository root and that directory is `./drafts`. That directory is created if it does not exist. On success, stdout is the absolute path of the letter file. It does not write a Google Doc and it does not write a PDF. `go test` does not run `/usr/bin/fm` and does not read a real template.
 
