@@ -37,8 +37,8 @@ var ErrFMArgLimit = errors.New("docs-cli: fm text exceeds the argument limit")
 var ErrDraftSchema = errors.New("docs-cli: fm output is not the draft schema")
 
 // DraftInstructions is the fm --instructions argument for a cover letter.
-// The template is a pattern. Title, duties, and requirements are this job.
-const DraftInstructions = `The template is a pattern for structure and voice only, not text to paste. Keep the template's language, salutation, closing, paragraph shape, and the applicant's name and contact lines. Rewrite the body for this job's Duties and Requirements. Do not invent an employer, date, degree, or years of experience that appears in neither the template nor the JSON. Do not address this job with an employer from the template's previous role. Title is this job's title. The letter field is the whole letter and nothing else.`
+// One prompt drafts the whole letter. The bytes match design PR 22.
+const DraftInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. Keep the template's language, salutation shape, closing, and paragraph shape. Keep an applicant name or contact line only when the template gives that line as real text. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, and Requirements. Title is the role being applied for, not the applicant's current job. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, and do not use an employer from the template's previous role. When Company is (none), do not invent an employer and do not write (none) into the letter. Rewrite the body for this job's Duties and Requirements. Do not invent a recipient, job board, compliment, current job title, degree, date, or years of experience that appears in neither the template nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
 
 // LetterSchema is the fm --schema argument accepted on 2026-10-02.
 // It is the compact byte string, not the pretty-printed object dialect.
@@ -105,14 +105,20 @@ func CheckDraftRequirements(doc Document) error {
 }
 
 // DraftPrompt builds the fm --text value for a cover letter.
+// Order is Title, Company, Duties, Requirements, Template.
 // templateText is copied unchanged. Job emails are removed.
-// An empty requirements list returns ErrRequirementsEmpty.
+// An empty company prints (none). An empty requirements list returns ErrRequirementsEmpty.
 func DraftPrompt(doc Document, templateText string) (string, error) {
 	if err := CheckDraftRequirements(doc); err != nil {
 		return "", err
 	}
+	company := redact(doc.Header.Company)
+	if company == "" {
+		company = "(none)"
+	}
 	var b strings.Builder
 	writeBlock(&b, "Title:", redact(doc.Header.TitleBlock))
+	writeBlock(&b, "Company:", company)
 	writeBlock(&b, "Duties:", listBody(promptLines(doc.Duties)))
 	writeBlock(&b, "Requirements:", listBody(promptLines(doc.Requirements)))
 	writeBlock(&b, "Template:", templateText)
