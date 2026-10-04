@@ -12,3 +12,4 @@ token.json.*.tmp
 *.html
 /tmp
 *.pdf
+drafts/

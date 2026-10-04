@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
@@ -33,6 +34,7 @@ commands:
   parse --html PATH
   gemini-key
   analyze --json PATH
+  draft --json PATH --template PATH
 
 create:
   --title TITLE    document title; omitted means DOCS_DEFAULT_TITLE
@@ -47,6 +49,10 @@ gemini-key stores the Gemini API key in the keyring. The key is not a flag.
 
 analyze:
   --json PATH      section JSON from parse
+
+draft:
+  --json PATH      section JSON from parse
+  --template PATH  cover-letter template PDF
 
 Run from the repository root, the directory that contains .env.example.
 The release binary defaults to production. APP_ENV in the environment overrides it.
@@ -131,6 +137,8 @@ func run(args []string, d deps) int {
 		return runGeminiKey(args[1:], d)
 	case "analyze":
 		return runAnalyze(args[1:], d)
+	case "draft":
+		return runDraft(args[1:], d)
 	default:
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
@@ -628,6 +636,173 @@ func runAnalyze(args []string, d deps) int {
 		return 1
 	}
 	return 0
+}
+
+// errDraftsNotDirectory is returned when ./drafts exists and is not a directory.
+var errDraftsNotDirectory = errors.New("docs-cli: drafts is not a directory")
+
+// draftRootForTest is the working directory injected by tests.
+// Empty uses os.Getwd, so drafts is ./drafts.
+var draftRootForTest string
+
+// draftClock is the local clock used for draft file names.
+var draftClock = time.Now
+
+// SetDraftRootForTest injects the directory whose child is drafts.
+// An empty dir restores the working directory. Tests restore the previous value.
+func SetDraftRootForTest(dir string) {
+	draftRootForTest = dir
+}
+
+func runDraft(args []string, d deps) int {
+	fs := newFlagSet("draft", d.Stderr)
+	jsonFlag := fs.String("json", "", "section JSON from parse")
+	templateFlag := fs.String("template", "", "cover-letter template PDF")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	jsonSet, templateSet := false, false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "json":
+			jsonSet = true
+		case "template":
+			templateSet = true
+		}
+	})
+	if !jsonSet || *jsonFlag == "" || !templateSet || *templateFlag == "" {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+
+	// A valid draft checks ./drafts in the working directory before it reads JSON.
+	dir, err := ensureDraftsDir()
+	if errors.Is(err, errDraftsNotDirectory) {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+
+	raw, err := readLimitedFile(*jsonFlag, maxJSONBytes)
+	if errors.Is(err, errJSONTooBig) {
+		fmt.Fprintln(d.Stderr, errJSONTooLarge)
+		return 1
+	}
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	var doc jobad.Document
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s: %s\n", *jsonFlag, err.Error())
+		return 1
+	}
+	if err := jobad.CheckDraftRequirements(doc); err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	templateText, err := jobad.ExtractTemplateText(*templateFlag)
+	if err != nil {
+		if errors.Is(err, jobad.ErrTemplateTooLarge) || errors.Is(err, jobad.ErrTemplateNoText) {
+			fmt.Fprintln(d.Stderr, err.Error())
+			return 1
+		}
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	letter, err := jobad.Draft(doc, templateText)
+	if err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	path, err := writeDraftLetter(dir, letter)
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	fmt.Fprintln(d.Stdout, path)
+	return 0
+}
+
+func draftParentDir() (string, error) {
+	if draftRootForTest != "" {
+		return draftRootForTest, nil
+	}
+	return os.Getwd()
+}
+
+func ensureDraftsDir() (string, error) {
+	root, err := draftParentDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, "drafts")
+	info, err := os.Stat(dir)
+	if err == nil {
+		if !info.IsDir() {
+			return "", errDraftsNotDirectory
+		}
+		return dir, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// writeDraftLetter stores the letter in the working directory's drafts folder.
+// The name is the local timestamp. An existing name uses -2 through -100 with O_EXCL.
+// A letter that already ends in a newline is stored unchanged.
+func writeDraftLetter(dir, letter string) (string, error) {
+	if !strings.HasSuffix(letter, "\n") {
+		letter += "\n"
+	}
+	stamp := draftClock().Local().Format("20060102T150405.000")
+	var lastErr error
+	for n := 1; n <= 100; n++ {
+		name := stamp + ".txt"
+		if n > 1 {
+			name = fmt.Sprintf("%s-%d.txt", stamp, n)
+		}
+		path := filepath.Join(dir, name)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			lastErr = err
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, werr := io.WriteString(f, letter)
+		cerr := f.Close()
+		if werr != nil || cerr != nil {
+			_ = os.Remove(path)
+			if werr != nil {
+				return "", werr
+			}
+			return "", cerr
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			_ = os.Remove(path)
+			return "", err
+		}
+		return abs, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no free draft name")
+	}
+	return "", lastErr
 }
 
 func readLimitedFile(path string, limit int) ([]byte, error) {
