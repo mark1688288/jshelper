@@ -37,11 +37,11 @@ func TestDraftPromptShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "Title:\nSystem Analyst\n\nDuties:\n(none)\n\nRequirements:\n- Know Go\n- React (For Frontend)\n\nTemplate:\nDear team\nada@example.com\n"
+	want := "Title:\nSystem Analyst\n\nCompany:\n(none)\n\nDuties:\n(none)\n\nRequirements:\n- Know Go\n- React (For Frontend)\n\nTemplate:\nDear team\nada@example.com\n"
 	if got != want {
 		t.Fatalf("prompt =\n%s\nwant =\n%s", got, want)
 	}
-	order := []string{"Title:\n", "Duties:\n", "Requirements:\n", "Template:\n"}
+	order := []string{"Title:\n", "Company:\n", "Duties:\n", "Requirements:\n", "Template:\n"}
 	at := 0
 	for _, label := range order {
 		i := strings.Index(got, label)
@@ -61,7 +61,7 @@ func TestDraftPromptShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = "Title:\nSystem Analyst\n\nDuties:\n- Build services\n\nRequirements:\n- Know Go\n\nTemplate:\nada@example.com\n"
+	want = "Title:\nSystem Analyst\n\nCompany:\n(none)\n\nDuties:\n- Build services\n\nRequirements:\n- Know Go\n\nTemplate:\nada@example.com\n"
 	if got != want {
 		t.Fatalf("duties prompt =\n%s\nwant =\n%s", got, want)
 	}
@@ -88,21 +88,19 @@ func TestDraftPromptOmitsUnusedFields(t *testing.T) {
 	}
 	for _, banned := range []string{
 		"source-token-9f3a.html",
-		"COMPANY-TOKEN",
 		"LOCATION-TOKEN",
 		"WORKTYPE-TOKEN",
 		"CLASS-TOKEN",
 		"BENEFITS-TOKEN",
 		"TRAILER-SENTINEL",
 		"Benefits:",
-		"Company:",
 		"Offer:",
 	} {
 		if strings.Contains(got, banned) {
 			t.Fatalf("prompt contains %q\n%s", banned, got)
 		}
 	}
-	for _, keep := range []string{"Title:\nSystem Analyst", "Duties:\n- Build services", "Requirements:\n- Know Go", "Template:\nada@example.com"} {
+	for _, keep := range []string{"Title:\nSystem Analyst", "Company:\nCOMPANY-TOKEN", "Duties:\n- Build services", "Requirements:\n- Know Go", "Template:\nada@example.com"} {
 		if !strings.Contains(got, keep) {
 			t.Fatalf("prompt missing %q\n%s", keep, got)
 		}
@@ -111,7 +109,10 @@ func TestDraftPromptOmitsUnusedFields(t *testing.T) {
 
 func TestDraftPromptRedactsJobNotTemplate(t *testing.T) {
 	doc := Document{
-		Header:       Header{TitleBlock: "Analyst person@example.com"},
+		Header: Header{
+			TitleBlock: "Analyst person@example.com",
+			Company:    "Acme person@example.com Ltd",
+		},
 		Duties:       []string{"Mail person@example.com daily"},
 		Requirements: []string{"person@example.com", "Know Go"},
 	}
@@ -122,10 +123,23 @@ func TestDraftPromptRedactsJobNotTemplate(t *testing.T) {
 	if strings.Contains(got, "person@example.com") {
 		t.Fatalf("prompt contains job email\n%s", got)
 	}
-	for _, keep := range []string{"Analyst", "Mail daily", "Know Go", "ada@example.com"} {
+	for _, keep := range []string{"Analyst", "Mail daily", "Know Go", "ada@example.com", "Company:\nAcme Ltd"} {
 		if !strings.Contains(got, keep) {
 			t.Fatalf("prompt missing %q\n%s", keep, got)
 		}
+	}
+
+	emailOnly := doc
+	emailOnly.Header.Company = "person@example.com"
+	got, err = DraftPrompt(emailOnly, "ada@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "person@example.com") {
+		t.Fatalf("prompt contains job email\n%s", got)
+	}
+	if !strings.Contains(got, "Company:\n(none)\n") {
+		t.Fatalf("prompt =\n%s", got)
 	}
 }
 
@@ -291,28 +305,17 @@ func TestDraftAvailableThenRespond(t *testing.T) {
 	if LetterSchema != wantSchema || LetterSchema == AnalysisSchema {
 		t.Fatalf("schema = %q", LetterSchema)
 	}
-	for _, phrase := range []string{
-		"pattern for structure and voice only",
-		"language, salutation, closing, paragraph shape",
-		"applicant's name and contact lines",
-		"Duties and Requirements",
-		"Do not invent an employer, date, degree, or years of experience",
-		"template's previous role",
-		"Title is this job's title",
-		"letter field is the whole letter",
-	} {
-		if !strings.Contains(DraftInstructions, phrase) {
-			t.Fatalf("instructions missing %q", phrase)
-		}
+	const wantInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. Keep the template's language, salutation shape, closing, and paragraph shape. Keep an applicant name or contact line only when the template gives that line as real text. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, and Requirements. Title is the role being applied for, not the applicant's current job. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, and do not use an employer from the template's previous role. When Company is (none), do not invent an employer and do not write (none) into the letter. Rewrite the body for this job's Duties and Requirements. Do not invent a recipient, job board, compliment, current job title, degree, date, or years of experience that appears in neither the template nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
+	if DraftInstructions != wantInstructions || strings.Contains(DraftInstructions, "\n") {
+		t.Fatalf("instructions = %q", DraftInstructions)
 	}
-	if strings.Contains(DraftInstructions, "\n") {
-		t.Fatal("instructions contain a newline")
+	if !strings.Contains(calls[1][len(calls[1])-1], "Company:\nCOMPANY-TOKEN") {
+		t.Fatal("company was omitted")
 	}
 	for _, arg := range calls[1] {
 		for _, banned := range []string{
 			"TRAILER-SENTINEL",
 			"BENEFITS-TOKEN",
-			"COMPANY-TOKEN",
 			"LOCATION-TOKEN",
 			"WORKTYPE-TOKEN",
 			"CLASS-TOKEN",

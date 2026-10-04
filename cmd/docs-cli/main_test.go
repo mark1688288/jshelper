@@ -1964,12 +1964,12 @@ func TestDraftCommandFakeFM(t *testing.T) {
 		if !strings.Contains(text, "ada@example.com") || !strings.Contains(text, "Know Go") {
 			t.Fatalf("text %q", text)
 		}
-		if !strings.Contains(text, "Duties:\n(none)") {
+		if !strings.Contains(text, "Duties:\n(none)") || !strings.Contains(text, "Company:\nCOMPANY-TOKEN") {
 			t.Fatalf("text %q", text)
 		}
 		for _, banned := range []string{
 			apiKey, "person@example.com", "TRAILER-SENTINEL", "BENEFITS-TOKEN",
-			"COMPANY-TOKEN", "LOCATION-TOKEN", "WORKTYPE-TOKEN", "CLASS-TOKEN", doc.Source,
+			"LOCATION-TOKEN", "WORKTYPE-TOKEN", "CLASS-TOKEN", doc.Source,
 			jobad.AnalysisSchema,
 		} {
 			if strings.Contains(text, banned) {

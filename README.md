@@ -163,7 +163,7 @@ docs-cli analyze --json PATH
 
 An empty requirements list exits 1 with `docs-cli: requirements is empty` and does not run `fm`.
 
-`draft` reads a cover-letter template PDF and the section JSON from `parse`, then writes a letter with the on-device model. The template is a pattern for structure and voice. It needs macOS, Apple Intelligence, and `/usr/bin/fm`. A privileged user must already have run `sudo fm license` on that Mac. The letter is saved in a `drafts` directory in the working directory. Run from the repository root and that directory is `./drafts`. That directory is created if it does not exist. On success, stdout is the absolute path of the letter file. It does not write a Google Doc and it does not write a PDF. `go test` does not run `/usr/bin/fm` and does not read a real template.
+`draft` reads a cover-letter template PDF and the section JSON from `parse`, then writes a letter with the on-device model. The template is a pattern for structure and voice. The on-device model drafts the whole letter from the job JSON and the template's structure and voice without copying square-bracket placeholders, and the program does not fill those placeholders afterward. It needs macOS, Apple Intelligence, and `/usr/bin/fm`. A privileged user must already have run `sudo fm license` on that Mac. The letter is saved in a `drafts` directory in the working directory. Run from the repository root and that directory is `./drafts`. That directory is created if it does not exist. On success, stdout is the absolute path of the letter file. It does not write a Google Doc and it does not write a PDF. `go test` does not run `/usr/bin/fm` and does not read a real template.
 
 ```bash
 docs-cli draft --json PATH --template PATH
