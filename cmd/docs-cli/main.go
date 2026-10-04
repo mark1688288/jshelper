@@ -43,7 +43,7 @@ create:
   --folder FOLDER  Drive folder id or folder URL for this run; overrides GOOGLE_DRIVE_FOLDER_ID
 
 parse:
-  --html PATH      saved JobsDB HTML file
+  --html PATH      saved job HTML file
 
 gemini-key stores the Gemini API key in the keyring. The key is not a flag.
 
@@ -452,7 +452,7 @@ func (d deps) createDocument(ctx context.Context, cfg *config.Config, tok *oauth
 
 func runParse(args []string, d deps) int {
 	fs := newFlagSet("parse", d.Stderr)
-	htmlFlag := fs.String("html", "", "saved JobsDB HTML file")
+	htmlFlag := fs.String("html", "", "saved job HTML file")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -546,6 +546,9 @@ func applyGemini(ctx context.Context, d deps, page []byte, doc jobad.Document) j
 	blocks, err := jobad.CollectBlocks(page)
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
+		return doc
+	}
+	if len(blocks) == 0 {
 		return doc
 	}
 	mapped, err := d.mapSections(ctx, doc, blocks)

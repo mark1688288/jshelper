@@ -58,7 +58,7 @@ type geminiKey struct {
 	APIKey string `json:"api_key"`
 }
 
-// Block is one li or non-heading paragraph from jobAdDetails.
+// Block is one li or non-heading paragraph from the same scope as Parse.
 // Heading is the preceding heading, with emails removed. Text is the block.
 type Block struct {
 	Heading string
@@ -121,26 +121,33 @@ func LoadGeminiKey() (string, error) {
 	return item.APIKey, nil
 }
 
-// CollectBlocks lists li items and non-heading paragraphs in jobAdDetails.
-// Each block keeps the heading text that preceded it. Emails are removed.
-// Header fields are not collected. A failure's Error text is the blocks
-// stderr line and does not include the parser or sentinel text.
+// CollectBlocks lists li items and non-heading paragraphs in the same scope
+// as Parse. A jobAdDetails page collects only that element. Otherwise it
+// collects the JSON-LD description, or the body paragraphs outside nav,
+// header, footer, and role=navigation. Emails are removed. Header fields
+// are not collected. A page Parse rejects returns the blocks stderr line.
 func CollectBlocks(page []byte) ([]Block, error) {
 	root, err := html.Parse(strings.NewReader(string(page)))
 	if err != nil {
 		return nil, blockReject(err)
 	}
-	body := findAutomation(root, "jobAdDetails")
-	if body == nil {
-		return nil, blockReject(ErrJobAdDetailsNotFound)
+	if _, err := parseRoot(root); err != nil {
+		return nil, blockReject(err)
+	}
+	scope, ok := locate(root)
+	if !ok || scope.node == nil {
+		return []Block{}, nil
 	}
 	var blocks []Block
-	walkBlocks(body, "", &blocks)
+	walkBlocks(scope.node, "", &blocks, scope.skipChrome)
 	return blocks, nil
 }
 
-func walkBlocks(n *html.Node, heading string, blocks *[]Block) string {
+func walkBlocks(n *html.Node, heading string, blocks *[]Block, skipChrome bool) string {
 	if n.Type == html.ElementNode {
+		if skipChrome && chrome(n) {
+			return heading
+		}
 		switch n.Data {
 		case "script", "style", "svg":
 			return heading
@@ -153,16 +160,16 @@ func walkBlocks(n *html.Node, heading string, blocks *[]Block) string {
 			}
 			return heading
 		case "p":
-			return walkBlockP(n, heading, blocks)
+			return walkBlockP(n, heading, blocks, skipChrome)
 		}
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		heading = walkBlocks(c, heading, blocks)
+		heading = walkBlocks(c, heading, blocks, skipChrome)
 	}
 	return heading
 }
 
-func walkBlockP(n *html.Node, heading string, blocks *[]Block) string {
+func walkBlockP(n *html.Node, heading string, blocks *[]Block, skipChrome bool) string {
 	raw := textOf(n)
 	norm := normalizeHeading(raw)
 	if utf8.RuneCountInString(norm) <= maxHeadingRunes {
@@ -172,7 +179,7 @@ func walkBlockP(n *html.Node, heading string, blocks *[]Block) string {
 	}
 	if containsHeading(n) {
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			heading = walkBlocks(c, heading, blocks)
+			heading = walkBlocks(c, heading, blocks, skipChrome)
 		}
 		return heading
 	}

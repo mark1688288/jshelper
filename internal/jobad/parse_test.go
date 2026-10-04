@@ -491,6 +491,237 @@ func TestParseMissingJobAdDetails(t *testing.T) {
 	}
 }
 
+func TestParseJSONLD(t *testing.T) {
+	const work = `[ "TEMPORARY", "CONTRACTOR" ]`
+	page := `<title>System Analyst at CTgoodjobs</title>
+<meta property="og:title" content="OG System Analyst">
+<script>loginId</script>
+<script type="application/ld+json">{not json</script>
+<script type="application/ld+json">` + mustJSON(t, map[string]any{
+		"@context": "https://schema.org",
+		"@type":    "JobPosting",
+		"title":    "System Analyst",
+		"hiringOrganization": map[string]any{
+			"@type": "Organization",
+			"name":  "Acme person@example.com Ltd",
+			"logo":  "https://example.test/logo.gif",
+		},
+		"jobLocation": []any{
+			map[string]any{
+				"@type": "Place",
+				"address": map[string]any{
+					"addressLocality": "Wan Chai",
+					"streetAddress":   "1 Harbour Road",
+					"addressRegion":   "Hong Kong",
+					"postalCode":      "999077",
+				},
+				"geo": map[string]any{"latitude": 22.2776, "longitude": 114.1729},
+			},
+		},
+		"employmentType":       work,
+		"occupationalCategory": "Analysts",
+		"baseSalary":           map[string]any{"currency": "HKD"},
+		"url":                  "https://example.test/job",
+		"description": `<p><strong>Benefits</strong></p><ul><li>Medical cover</li></ul>` +
+			`<p><strong>Key Responsibilities</strong></p><ul><li>Build the API</li></ul>` +
+			`<p><strong>Requirements</strong></p><ul><li>Know Go</li><li>Write to person@example.com today</li></ul>` +
+			`<p>Apply on the site</p>`,
+	}) + `</script>
+<script type="application/ld+json">` + mustJSON(t, map[string]any{
+		"@type": "JobPosting",
+		"title": "Second posting",
+	}) + `</script>`
+	doc := parseHTML(t, page)
+	if doc.Source != "" {
+		t.Fatalf("source = %q", doc.Source)
+	}
+	if doc.Header.TitleBlock != "System Analyst" {
+		t.Fatalf("title_block = %q", doc.Header.TitleBlock)
+	}
+	if doc.Header.Company != "Acme Ltd" {
+		t.Fatalf("company = %q", doc.Header.Company)
+	}
+	if doc.Header.Location != "Wan Chai" {
+		t.Fatalf("location = %q", doc.Header.Location)
+	}
+	if doc.Header.WorkType != work {
+		t.Fatalf("work_type = %q", doc.Header.WorkType)
+	}
+	if doc.Header.Classification != "Analysts" {
+		t.Fatalf("classification = %q", doc.Header.Classification)
+	}
+	if len(doc.Benefits) != 0 {
+		t.Fatalf("benefits = %#v", doc.Benefits)
+	}
+	if got, want := strings.Join(doc.Duties, "|"), "Build the API"; got != want {
+		t.Fatalf("duties = %q", got)
+	}
+	if got, want := strings.Join(doc.Requirements, "|"), "Know Go|Write to today"; got != want {
+		t.Fatalf("requirements = %q", got)
+	}
+	if got, want := strings.Join(doc.Trailer, "|"), "Medical cover|Apply on the site"; got != want {
+		t.Fatalf("trailer = %q", got)
+	}
+	raw := string(marshal(t, doc))
+	for _, leak := range []string{"CTgoodjobs", "OG System Analyst", "Second posting", "person@example.com", "loginId", "999077", "22.2776", "logo.gif", "HKD", "1 Harbour Road", "example.test"} {
+		if strings.Contains(raw, leak) {
+			t.Fatalf("json contains %s:\n%s", leak, raw)
+		}
+	}
+}
+
+func TestParseJSONLDFallbacks(t *testing.T) {
+	page := `<script type="application/ld+json">` + mustJSON(t, map[string]any{
+		"@context": "https://schema.org",
+		"@graph": []any{
+			map[string]any{"@type": "Organization", "name": "Not a job"},
+			map[string]any{
+				"@type": "JobPosting",
+				"title": "From Graph",
+				"jobLocation": map[string]any{
+					"address": map[string]any{
+						"streetAddress": "1 Road",
+						"addressRegion": "Hong Kong",
+						"postalCode":    "999077",
+					},
+				},
+				"employmentType":       []any{"TEMPORARY", "CONTRACTOR"},
+				"occupationalCategory": "ICT",
+			},
+			map[string]any{"@type": "JobPosting", "title": "Later title"},
+		},
+	}) + `</script>`
+	doc := parseHTML(t, page)
+	if doc.Header.TitleBlock != "From Graph" || doc.Header.Location != "1 Road" || doc.Header.WorkType != "TEMPORARY, CONTRACTOR" || doc.Header.Classification != "ICT" {
+		t.Fatalf("header = %+v", doc.Header)
+	}
+	if !sectionsEmpty(doc) {
+		t.Fatalf("lists = %#v %#v %#v %#v", doc.Benefits, doc.Duties, doc.Requirements, doc.Trailer)
+	}
+
+	region := `<script type="application/ld+json">` + mustJSON(t, map[string]any{
+		"@type": []any{"JobPosting"},
+		"title": "Region role",
+		"jobLocation": []any{
+			map[string]any{"address": map[string]any{"addressLocality": "  ", "streetAddress": "", "addressRegion": "Kowloon"}},
+		},
+		"occupationalCategory": []any{"Not a string"},
+	}) + `</script>`
+	doc = parseHTML(t, region)
+	if doc.Header.TitleBlock != "Region role" || doc.Header.Location != "Kowloon" || doc.Header.Classification != "" || doc.Header.WorkType != "" {
+		t.Fatalf("header = %+v", doc.Header)
+	}
+}
+
+func TestParseJSONLDHeaderWithoutBlocks(t *testing.T) {
+	page := `<title>CTgoodjobs</title><script type="application/ld+json">` + mustJSON(t, map[string]any{
+		"@type":       "JobPosting",
+		"title":       "Only Title",
+		"description": "<p><strong>Key Responsibilities</strong></p>",
+	}) + `</script>`
+	doc := parseHTML(t, page)
+	if doc.Header.TitleBlock != "Only Title" || doc.Header.Company != "" {
+		t.Fatalf("header = %+v", doc.Header)
+	}
+	if !sectionsEmpty(doc) {
+		t.Fatalf("lists = %#v %#v %#v %#v", doc.Benefits, doc.Duties, doc.Requirements, doc.Trailer)
+	}
+	if _, err := CollectBlocks([]byte(page)); err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := CollectBlocks([]byte(page))
+	if err != nil || len(blocks) != 0 {
+		t.Fatalf("blocks = %#v err %v", blocks, err)
+	}
+}
+
+func TestParseJobAdDetailsIgnoresJSONLD(t *testing.T) {
+	page := `<script type="application/ld+json">` + mustJSON(t, map[string]any{
+		"@type": "JobPosting",
+		"title": "From JSON",
+		"hiringOrganization": map[string]any{
+			"name": "JSON Co",
+		},
+		"description": "<p><strong>Key Responsibilities</strong></p><ul><li>FROM-JSON</li></ul>",
+	}) + `</script>
+<span data-automation="job-detail-title">From DOM</span>
+<span data-automation="advertiser-name">DOM Co</span>
+<div data-automation="jobAdDetails">
+<p><strong>Job Description</strong></p>
+<ul><li>FROM-DOM</li></ul>
+</div>`
+	doc := parseHTML(t, page)
+	if doc.Header.TitleBlock != "From DOM" || doc.Header.Company != "DOM Co" {
+		t.Fatalf("header = %+v", doc.Header)
+	}
+	if strings.Join(doc.Duties, "|") != "FROM-DOM" {
+		t.Fatalf("duties = %#v", doc.Duties)
+	}
+	raw := string(marshal(t, doc))
+	if strings.Contains(raw, "From JSON") || strings.Contains(raw, "JSON Co") || strings.Contains(raw, "FROM-JSON") {
+		t.Fatalf("json-ld leaked:\n%s", raw)
+	}
+}
+
+func TestParseBodySkipsChrome(t *testing.T) {
+	page := `<title>Site Name Jobs</title>
+<meta property="og:title" content="OG Site">
+<nav><p>NAV-P</p><ul><li>NAV-LI</li></ul></nav>
+<header><p>HEAD-P</p></header>
+<footer><li>FOOT-LI</li></footer>
+<div role="navigation"><p>ROLE-P</p><ul><li>ROLE-LI</li></ul></div>
+<p><strong>Key Responsibilities</strong></p>
+<ul><li>Ship the work</li></ul>
+<p><strong>Requirements</strong></p>
+<ul><li>Know Go</li></ul>
+<p>After requirements</p>`
+	doc := parseHTML(t, page)
+	if doc.Header != (Header{}) {
+		t.Fatalf("header = %+v", doc.Header)
+	}
+	if strings.Join(doc.Duties, "|") != "Ship the work" {
+		t.Fatalf("duties = %#v", doc.Duties)
+	}
+	if strings.Join(doc.Requirements, "|") != "Know Go" {
+		t.Fatalf("requirements = %#v", doc.Requirements)
+	}
+	if strings.Join(doc.Trailer, "|") != "After requirements" {
+		t.Fatalf("trailer = %#v", doc.Trailer)
+	}
+	if len(doc.Benefits) != 0 {
+		t.Fatalf("benefits = %#v", doc.Benefits)
+	}
+	raw := string(marshal(t, doc))
+	for _, leak := range []string{"Site Name", "OG Site", "NAV-P", "NAV-LI", "HEAD-P", "FOOT-LI", "ROLE-P", "ROLE-LI"} {
+		if strings.Contains(raw, leak) {
+			t.Fatalf("json contains %s:\n%s", leak, raw)
+		}
+	}
+}
+
+func TestParsePlainParagraph(t *testing.T) {
+	doc := parseHTML(t, `<title>Site Name</title><p>no ad</p>`)
+	if doc.Header != (Header{}) || strings.Join(doc.Trailer, "|") != "no ad" {
+		t.Fatalf("doc = %+v", doc)
+	}
+	if len(doc.Benefits) != 0 || len(doc.Duties) != 0 || len(doc.Requirements) != 0 {
+		t.Fatalf("lists = %#v %#v %#v", doc.Benefits, doc.Duties, doc.Requirements)
+	}
+	_, err := Parse([]byte(`<div>no ad</div>`))
+	if !errors.Is(err, ErrJobAdDetailsNotFound) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
 func parseHTML(t *testing.T, page string) Document {
 	t.Helper()
 	doc, err := Parse([]byte(page))
