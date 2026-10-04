@@ -47,7 +47,7 @@ In that same project, finish these Console pages by hand. Create a Desktop clien
 - Data Access: add only `https://www.googleapis.com/auth/drive`. `https://console.cloud.google.com/auth/scopes?project=<GCP_PROJECT_ID>`
 - Clients: Desktop app named `Docs CLI Desktop`. `https://console.cloud.google.com/auth/clients?project=<GCP_PROJECT_ID>`
 
-> [!NOTICE]
+> [!NOTE]
 > Stay in Testing unless you are in a Google Workspace and can complete Google verification for this app.
 
 ```bash

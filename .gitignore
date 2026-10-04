@@ -13,3 +13,4 @@ token.json.*.tmp
 /tmp
 *.pdf
 drafts/
+asset/
