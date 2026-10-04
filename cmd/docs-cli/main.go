@@ -31,7 +31,7 @@ commands:
   create [--title TITLE] [--text TEXT] [--folder FOLDER]
   auth
   setup
-  parse --html PATH
+  parse --html PATH [--autoparse]
   gemini-key
   analyze --json PATH
   draft --json PATH --template PATH
@@ -44,6 +44,7 @@ create:
 
 parse:
   --html PATH      saved job HTML file
+  --autoparse      send the saved HTML to Gemini
 
 gemini-key stores the Gemini API key in the keyring. The key is not a flag.
 
@@ -103,7 +104,7 @@ type deps struct {
 	WriteCredentials    func(*config.Config) error
 	Authorize           func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error)
 	CreateDocument      func(ctx context.Context, title, body, folderID string, insertIndex int64) (string, error)
-	// GeminiClient is the HTTP client for section mapping and for analyze
+	// GeminiClient is the HTTP client for section mapping, autoparse, and analyze
 	// when fm fails. Nil uses the default client. Tests pass a client that does not call Gemini.
 	GeminiClient *http.Client
 }
@@ -453,6 +454,7 @@ func (d deps) createDocument(ctx context.Context, cfg *config.Config, tok *oauth
 func runParse(args []string, d deps) int {
 	fs := newFlagSet("parse", d.Stderr)
 	htmlFlag := fs.String("html", "", "saved job HTML file")
+	auto := fs.Bool("autoparse", false, "send the saved HTML to Gemini")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -480,6 +482,9 @@ func runParse(args []string, d deps) int {
 		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 		return 1
 	}
+	if *auto {
+		return runAutoparse(d, *htmlFlag, page)
+	}
 	doc, err := jobad.Parse(page)
 	if errors.Is(err, jobad.ErrJobAdDetailsNotFound) {
 		fmt.Fprintln(d.Stderr, errJobAdDetails)
@@ -496,6 +501,60 @@ func runParse(args []string, d deps) int {
 		return 1
 	}
 	return 0
+}
+
+func runAutoparse(d deps, source string, page []byte) int {
+	if code := prepareAutoparseKey(d); code != 0 {
+		return code
+	}
+	doc, err := jobad.Autoparse(context.Background(), page, d.GeminiClient)
+	if err != nil {
+		if errors.Is(err, keyring.ErrNotFound) {
+			fmt.Fprintln(d.Stderr, errGeminiKeyMissing)
+		} else {
+			fmt.Fprintln(d.Stderr, err.Error())
+		}
+		return 1
+	}
+	doc.Source = source
+	if err := writeDocument(d.Stdout, doc); err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	return 0
+}
+
+func prepareAutoparseKey(d deps) int {
+	_, err := jobad.LoadGeminiKey()
+	switch {
+	case errors.Is(err, keyring.ErrNotFound):
+		tty, closeTTY := terminalOrNil(d)
+		defer closeTTY()
+		if tty == nil {
+			fmt.Fprintln(d.Stderr, errGeminiKeyMissing)
+			return 1
+		}
+		secret, rerr := tty.ReadSecret(geminiKeyPrompt)
+		if rerr != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", rerr.Error())
+			return 1
+		}
+		if secret == "" {
+			fmt.Fprintln(d.Stderr, errGeminiKeyMissing)
+			return 1
+		}
+		if serr := jobad.StoreGeminiKey(secret); serr != nil {
+			fmt.Fprintln(d.Stderr, serr.Error())
+			return 1
+		}
+		fmt.Fprintln(d.Stderr, errGeminiStored)
+		return 0
+	case err != nil:
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	default:
+		return 0
+	}
 }
 
 func readHTMLFile(path string) ([]byte, error) {

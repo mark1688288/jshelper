@@ -1174,6 +1174,166 @@ func assertAnalysisRequest(t *testing.T, cap *captured, key, prompt string) {
 	}
 }
 
+func TestAutoparse(t *testing.T) {
+	const key = "autoparse-library-key"
+	const email = "person@example.com"
+	const wantInstructions = `Read the saved job advertisement HTML and extract it into docs-cli section JSON.
+Put pay, allowances, and gratuity in benefits.
+Put responsibilities in duties.
+Put entry requirements and preferable attributes in requirements.
+Put deadlines, remarks, and other advertisement lines that are none of those three in trailer.
+Leave out site navigation, sign-in text, and search chrome.
+Fill header title_block, company, location, work_type, and classification from the advertisement. Use an empty string when the page does not state that field. Do not use a portal title that names the website instead of the job.
+Copy the advertisement wording. Do not invent employers, dates, or requirements.
+The source field may be empty. The program replaces it.`
+	if AutoparseInstructions != wantInstructions || strings.Contains(autoparseGeminiSchema, "additionalProperties") {
+		t.Fatalf("instructions or schema changed")
+	}
+	page := []byte(`<script>AUTOPARSE-HTML-SENTINEL</script><p>` + email + `</p>`)
+	model := `{
+		"source": "model-source",
+		"header": {"title_block": "Role", "company": "Acme ` + email + ` Ltd", "location": "", "work_type": "", "classification": ""},
+		"benefits": null,
+		"duties": ["Buy supplies"],
+		"requirements": ["Preferable attributes: Excel helps", "` + email + `"],
+		"trailer": []
+	}`
+	fmCalls := 0
+	SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+		fmCalls++
+		return nil, []byte("fm"), 1
+	})
+	t.Cleanup(func() {
+		SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+			return nil, []byte("fm exec not stubbed"), 1
+		})
+	})
+
+	t.Run("extracts and redacts", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		client, cap := testGeminiClient(t, http.StatusOK, geminiTextEnvelope(t, model))
+		got, err := Autoparse(context.Background(), page, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Source != "" || got.Header.TitleBlock != "Role" || got.Header.Company != "Acme Ltd" {
+			t.Fatalf("doc %#v", got)
+		}
+		if join(got.Benefits) != "" || join(got.Duties) != "Buy supplies" || join(got.Requirements) != "Preferable attributes: Excel helps" || join(got.Trailer) != "" {
+			t.Fatalf("lists %#v", got)
+		}
+		if got.Benefits == nil || got.Trailer == nil {
+			t.Fatal("nil list")
+		}
+		if fmCalls != 0 {
+			t.Fatalf("fm calls %d", fmCalls)
+		}
+		if strings.Contains(cap.body, email) || strings.Contains(cap.body, key) || strings.Contains(cap.url, key) {
+			t.Fatalf("request url %s body %s", cap.url, cap.body)
+		}
+		if cap.header.Get("x-goog-api-key") != key {
+			t.Fatalf("header %q", cap.header.Get("x-goog-api-key"))
+		}
+		if !strings.Contains(cap.body, "<script>AUTOPARSE-HTML-SENTINEL</script>") {
+			t.Fatalf("body %s", cap.body)
+		}
+		var req struct {
+			SystemInstruction struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"systemInstruction"`
+			Contents []struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"contents"`
+		}
+		if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
+			t.Fatal(err)
+		}
+		if len(req.SystemInstruction.Parts) != 1 || req.SystemInstruction.Parts[0].Text != wantInstructions {
+			t.Fatalf("instructions %#v", req.SystemInstruction.Parts)
+		}
+		if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || req.Contents[0].Parts[0].Text != emailRE.ReplaceAllString(string(page), "") {
+			t.Fatalf("user text %q", req.Contents)
+		}
+		if strings.Contains(cap.body, "additionalProperties") || strings.Contains(cap.url, "aiplatform.googleapis.com") {
+			t.Fatalf("url %s body %s", cap.url, cap.body)
+		}
+	})
+
+	t.Run("missing key", func(t *testing.T) {
+		cleanKeyring(t)
+		hits := 0
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			hits++
+			return nil, errors.New("called")
+		})}
+		_, err := Autoparse(context.Background(), page, client)
+		if !errors.Is(err, keyring.ErrNotFound) || hits != 0 {
+			t.Fatalf("err %v hits %d", err, hits)
+		}
+	})
+
+	t.Run("not json", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		client, _ := testGeminiClient(t, http.StatusOK, geminiTextEnvelope(t, "hello"))
+		_, err := Autoparse(context.Background(), page, client)
+		if !errors.Is(err, errGeminiAutoparseResponse) || strings.Contains(err.Error(), key) {
+			t.Fatalf("err %v", err)
+		}
+	})
+
+	t.Run("missing field", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		bad := strings.Replace(model, `"title_block": "Role", `, "", 1)
+		client, _ := testGeminiClient(t, http.StatusOK, geminiTextEnvelope(t, bad))
+		_, err := Autoparse(context.Background(), page, client)
+		if !errors.Is(err, errGeminiAutoparseResponse) {
+			t.Fatalf("err %v", err)
+		}
+	})
+
+	t.Run("extra field", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		bad := strings.Replace(model, `"source": "model-source"`, `"source": "model-source", "offer": []`, 1)
+		client, _ := testGeminiClient(t, http.StatusOK, geminiTextEnvelope(t, bad))
+		_, err := Autoparse(context.Background(), page, client)
+		if !errors.Is(err, errGeminiAutoparseResponse) {
+			t.Fatalf("err %v", err)
+		}
+	})
+
+	t.Run("status 400", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		const msg = "Request contains an invalid argument."
+		body := `{"error":{"status":"INVALID_ARGUMENT","message":"` + msg + `","details":["` + key + `"]}}`
+		client, _ := testGeminiClient(t, http.StatusBadRequest, body)
+		_, err := Autoparse(context.Background(), page, client)
+		want := "docs-cli: gemini autoparse rejected: status 400\n" +
+			"docs-cli: gemini autoparse rejected: INVALID_ARGUMENT: " + msg
+		if err == nil || err.Error() != want || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), "partition") || strings.Contains(err.Error(), "blocks") {
+			t.Fatalf("err %q", err)
+		}
+	})
+}
+
 func join(items []string) string {
 	return strings.Join(items, "|")
 }

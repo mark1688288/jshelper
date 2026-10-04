@@ -22,7 +22,7 @@ const (
 	keyringService = "docs-cli"
 	geminiAccount  = "gemini-api-key"
 
-	// geminiModel is the Gemini API model id for section mapping.
+	// geminiModel is the Gemini API model id for section mapping and autoparse.
 	geminiModel = "gemini-3.1-flash-lite"
 	geminiURL   = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel + ":generateContent"
 
@@ -46,13 +46,87 @@ var (
 	errGeminiAnalysisTimeout  = errors.New("docs-cli: gemini analysis rejected: timeout")
 	errGeminiAnalysisHTTP     = errors.New("docs-cli: gemini analysis rejected: http")
 	errGeminiAnalysisResponse = errors.New("docs-cli: gemini analysis rejected: response")
+
+	errGeminiAutoparseTimeout  = errors.New("docs-cli: gemini autoparse rejected: timeout")
+	errGeminiAutoparseHTTP     = errors.New("docs-cli: gemini autoparse rejected: http")
+	errGeminiAutoparseResponse = errors.New("docs-cli: gemini autoparse rejected: response")
 )
+
+// geminiCall selects the stderr prefix for one Gemini request.
+type geminiCall int
+
+const (
+	geminiMapping geminiCall = iota
+	geminiAnalysis
+	geminiAutoparse
+)
+
+func (c geminiCall) prefix() string {
+	switch c {
+	case geminiAnalysis:
+		return "docs-cli: gemini analysis rejected: "
+	case geminiAutoparse:
+		return "docs-cli: gemini autoparse rejected: "
+	default:
+		return "docs-cli: gemini mapping rejected: "
+	}
+}
+
+func (c geminiCall) timeoutErr() error {
+	switch c {
+	case geminiAnalysis:
+		return errGeminiAnalysisTimeout
+	case geminiAutoparse:
+		return errGeminiAutoparseTimeout
+	default:
+		return errGeminiTimeout
+	}
+}
+
+func (c geminiCall) httpErr() error {
+	switch c {
+	case geminiAnalysis:
+		return errGeminiAnalysisHTTP
+	case geminiAutoparse:
+		return errGeminiAutoparseHTTP
+	default:
+		return errGeminiHTTP
+	}
+}
+
+func (c geminiCall) responseErr() error {
+	switch c {
+	case geminiAnalysis:
+		return errGeminiAnalysisResponse
+	case geminiAutoparse:
+		return errGeminiAutoparseResponse
+	default:
+		return errGeminiResponse
+	}
+}
 
 // analysisGeminiSchema is the Gemini response schema for Analysis.
 // It is not the fm --schema dialect. Gemini rejects additionalProperties,
 // so that field is omitted. ParseAnalysis still rejects unknown fields
 // and a tech.level other than must or advantage.
 const analysisGeminiSchema = `{"type":"OBJECT","properties":{"must_have":{"type":"ARRAY","items":{"type":"STRING"}},"advantage":{"type":"ARRAY","items":{"type":"STRING"}},"min_years":{"type":"INTEGER","nullable":true},"degree":{"type":"STRING","nullable":true},"languages":{"type":"ARRAY","items":{"type":"STRING"}},"tech":{"type":"ARRAY","items":{"type":"OBJECT","properties":{"name":{"type":"STRING"},"level":{"type":"STRING","enum":["must","advantage"]},"applies_to":{"type":"STRING","nullable":true}},"required":["name","level","applies_to"]}},"soft_skills":{"type":"ARRAY","items":{"type":"STRING"}}},"required":["must_have","advantage","min_years","degree","languages","tech","soft_skills"]}`
+
+// AutoparseInstructions is the systemInstruction for parse --autoparse.
+// The bytes match the design. The user part is the saved HTML, not these sentences.
+const AutoparseInstructions = `Read the saved job advertisement HTML and extract it into docs-cli section JSON.
+Put pay, allowances, and gratuity in benefits.
+Put responsibilities in duties.
+Put entry requirements and preferable attributes in requirements.
+Put deadlines, remarks, and other advertisement lines that are none of those three in trailer.
+Leave out site navigation, sign-in text, and search chrome.
+Fill header title_block, company, location, work_type, and classification from the advertisement. Use an empty string when the page does not state that field. Do not use a portal title that names the website instead of the job.
+Copy the advertisement wording. Do not invent employers, dates, or requirements.
+The source field may be empty. The program replaces it.`
+
+// autoparseGeminiSchema is the Gemini response schema for a section document.
+// Gemini rejects additionalProperties, so that field is omitted.
+// decodeAutoparse still rejects unknown fields and missing keys.
+const autoparseGeminiSchema = `{"type":"OBJECT","properties":{"source":{"type":"STRING"},"header":{"type":"OBJECT","properties":{"title_block":{"type":"STRING"},"company":{"type":"STRING"},"location":{"type":"STRING"},"work_type":{"type":"STRING"},"classification":{"type":"STRING"}},"required":["title_block","company","location","work_type","classification"]},"benefits":{"type":"ARRAY","items":{"type":"STRING"}},"duties":{"type":"ARRAY","items":{"type":"STRING"}},"requirements":{"type":"ARRAY","items":{"type":"STRING"}},"trailer":{"type":"ARRAY","items":{"type":"STRING"}}},"required":["source","header","benefits","duties","requirements","trailer"]}`
 
 // rejectError is a stderr line that may wrap a cause without including the cause text.
 type rejectError struct {
@@ -292,7 +366,7 @@ func requestMapping(ctx context.Context, client *http.Client, key string, blocks
 	if err != nil {
 		return sectionMapping{}, errGeminiResponse
 	}
-	body, err := postGemini(ctx, client, key, payload, false)
+	body, err := postGemini(ctx, client, key, payload, geminiMapping)
 	if err != nil {
 		return sectionMapping{}, err
 	}
@@ -322,7 +396,7 @@ func requestAnalysis(ctx context.Context, client *http.Client, key, prompt strin
 	if err != nil {
 		return Analysis{}, errGeminiAnalysisResponse
 	}
-	raw, err := postGemini(ctx, client, key, payload, true)
+	raw, err := postGemini(ctx, client, key, payload, geminiAnalysis)
 	if err != nil {
 		return Analysis{}, err
 	}
@@ -337,16 +411,16 @@ func requestAnalysis(ctx context.Context, client *http.Client, key, prompt strin
 	return parsed, nil
 }
 
-func postGemini(ctx context.Context, client *http.Client, key string, payload []byte, analysis bool) ([]byte, error) {
+func postGemini(ctx context.Context, client *http.Client, key string, payload []byte, call geminiCall) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, geminiURL, bytes.NewReader(payload))
 	if err != nil {
-		return nil, geminiResponseError(analysis)
+		return nil, call.responseErr()
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-goog-api-key", key)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, geminiTransportError(err, analysis)
+		return nil, geminiTransportError(err, call)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -354,33 +428,20 @@ func postGemini(ctx context.Context, client *http.Client, key string, payload []
 		if readErr != nil {
 			errBody = nil
 		}
-		return nil, geminiStatusError(resp.StatusCode, errBody, key, analysis)
+		return nil, geminiStatusError(resp.StatusCode, errBody, key, call)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGeminiResponse+1))
 	if err != nil || len(body) > maxGeminiResponse {
-		return nil, geminiResponseError(analysis)
+		return nil, call.responseErr()
 	}
 	return body, nil
 }
 
-func geminiResponseError(analysis bool) error {
-	if analysis {
-		return errGeminiAnalysisResponse
-	}
-	return errGeminiResponse
-}
-
-func geminiTransportError(err error, analysis bool) error {
+func geminiTransportError(err error, call geminiCall) error {
 	if geminiTimedOut(err) {
-		if analysis {
-			return errGeminiAnalysisTimeout
-		}
-		return errGeminiTimeout
+		return call.timeoutErr()
 	}
-	if analysis {
-		return errGeminiAnalysisHTTP
-	}
-	return errGeminiHTTP
+	return call.httpErr()
 }
 
 func geminiTimedOut(err error) bool {
@@ -391,11 +452,8 @@ func geminiTimedOut(err error) bool {
 	return errors.As(err, &timeout) && timeout.Timeout()
 }
 
-func geminiStatusError(code int, body []byte, key string, analysis bool) error {
-	prefix := "docs-cli: gemini mapping rejected: "
-	if analysis {
-		prefix = "docs-cli: gemini analysis rejected: "
-	}
+func geminiStatusError(code int, body []byte, key string, call geminiCall) error {
+	prefix := call.prefix()
 	first := prefix + "status " + strconv.Itoa(code)
 	suffix, ok := geminiErrorSuffix(body)
 	if !ok {
@@ -663,5 +721,215 @@ func cloneStrings(in []string) []string {
 	}
 	out := make([]string, len(in))
 	copy(out, in)
+	return out
+}
+
+// Autoparse asks Gemini once to extract section JSON from saved HTML.
+// Emails are removed from the page text before it is sent. Markup stays.
+// The key is sent only in the x-goog-api-key header. Source is left empty.
+// A missing key or keyring failure returns that error and does not call Gemini.
+// There is no phrase-classification fallback. The error text does not include
+// the HTTP body, the transport error, or the API key.
+func Autoparse(ctx context.Context, page []byte, client *http.Client) (Document, error) {
+	key, err := LoadGeminiKey()
+	if err != nil {
+		return Document{}, err
+	}
+	if client == nil {
+		client = &http.Client{Timeout: geminiTimeout}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, geminiTimeout)
+	defer cancel()
+	payload, err := autoparseRequestBody(emailRE.ReplaceAllString(string(page), ""))
+	if err != nil {
+		return Document{}, errGeminiAutoparseResponse
+	}
+	raw, err := postGemini(ctx, client, key, payload, geminiAutoparse)
+	if err != nil {
+		return Document{}, err
+	}
+	text, err := geminiCandidateText(raw)
+	if err != nil {
+		return Document{}, errGeminiAutoparseResponse
+	}
+	return decodeAutoparse(text)
+}
+
+func autoparseRequestBody(page string) ([]byte, error) {
+	body := map[string]any{
+		"systemInstruction": map[string]any{
+			"parts": []any{map[string]any{"text": AutoparseInstructions}},
+		},
+		"contents": []any{
+			map[string]any{
+				"role":  "user",
+				"parts": []any{map[string]any{"text": page}},
+			},
+		},
+		"generationConfig": map[string]any{
+			"response_mime_type": "application/json",
+			"response_schema":    json.RawMessage(autoparseGeminiSchema),
+		},
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(body); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+func decodeAutoparse(text string) (Document, error) {
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.DisallowUnknownFields()
+	var raw struct {
+		Source       json.RawMessage `json:"source"`
+		Header       json.RawMessage `json:"header"`
+		Benefits     json.RawMessage `json:"benefits"`
+		Duties       json.RawMessage `json:"duties"`
+		Requirements json.RawMessage `json:"requirements"`
+		Trailer      json.RawMessage `json:"trailer"`
+	}
+	if err := dec.Decode(&raw); err != nil {
+		return Document{}, errGeminiAutoparseResponse
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return Document{}, errGeminiAutoparseResponse
+	}
+	if _, err := decodeRequiredString(raw.Source); err != nil {
+		return Document{}, errGeminiAutoparseResponse
+	}
+	header, err := decodeAutoparseHeader(raw.Header)
+	if err != nil {
+		return Document{}, errGeminiAutoparseResponse
+	}
+	benefits, err := decodeStringList(raw.Benefits)
+	if err != nil {
+		return Document{}, errGeminiAutoparseResponse
+	}
+	duties, err := decodeStringList(raw.Duties)
+	if err != nil {
+		return Document{}, errGeminiAutoparseResponse
+	}
+	requirements, err := decodeStringList(raw.Requirements)
+	if err != nil {
+		return Document{}, errGeminiAutoparseResponse
+	}
+	trailer, err := decodeStringList(raw.Trailer)
+	if err != nil {
+		return Document{}, errGeminiAutoparseResponse
+	}
+	redactHeader(&header)
+	return Document{
+		Header:       header,
+		Benefits:     redactList(benefits),
+		Duties:       redactList(duties),
+		Requirements: redactList(requirements),
+		Trailer:      redactList(trailer),
+	}, nil
+}
+
+func decodeAutoparseHeader(raw json.RawMessage) (Header, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return Header{}, errGeminiAutoparseResponse
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var fields struct {
+		TitleBlock     json.RawMessage `json:"title_block"`
+		Company        json.RawMessage `json:"company"`
+		Location       json.RawMessage `json:"location"`
+		WorkType       json.RawMessage `json:"work_type"`
+		Classification json.RawMessage `json:"classification"`
+	}
+	if err := dec.Decode(&fields); err != nil {
+		return Header{}, errGeminiAutoparseResponse
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return Header{}, errGeminiAutoparseResponse
+	}
+	title, err := decodeRequiredString(fields.TitleBlock)
+	if err != nil {
+		return Header{}, err
+	}
+	company, err := decodeRequiredString(fields.Company)
+	if err != nil {
+		return Header{}, err
+	}
+	location, err := decodeRequiredString(fields.Location)
+	if err != nil {
+		return Header{}, err
+	}
+	work, err := decodeRequiredString(fields.WorkType)
+	if err != nil {
+		return Header{}, err
+	}
+	class, err := decodeRequiredString(fields.Classification)
+	if err != nil {
+		return Header{}, err
+	}
+	return Header{
+		TitleBlock:     title,
+		Company:        company,
+		Location:       location,
+		WorkType:       work,
+		Classification: class,
+	}, nil
+}
+
+func decodeRequiredString(raw json.RawMessage) (string, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return "", errGeminiAutoparseResponse
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var s string
+	if err := dec.Decode(&s); err != nil {
+		return "", errGeminiAutoparseResponse
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return "", errGeminiAutoparseResponse
+	}
+	return s, nil
+}
+
+func decodeStringList(raw json.RawMessage) ([]string, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, errGeminiAutoparseResponse
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return []string{}, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var items []string
+	if err := dec.Decode(&items); err != nil {
+		return nil, errGeminiAutoparseResponse
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errGeminiAutoparseResponse
+	}
+	if items == nil {
+		items = []string{}
+	}
+	return items, nil
+}
+
+func redactList(items []string) []string {
+	out := []string{}
+	for _, item := range items {
+		item = redact(item)
+		if item == "" {
+			continue
+		}
+		out = append(out, item)
+	}
 	return out
 }
