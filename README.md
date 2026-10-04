@@ -141,7 +141,7 @@ Production `./docs-cli create` and `./docs-cli auth` use the same state machine 
 
 ## Job ads
 
-`parse` reads a saved JobsDB HTML file and writes section JSON to stdout. It does not read `.env` and it does not use the refresh token.
+`parse` reads a saved job HTML file and writes section JSON to stdout. A JobsDB page still uses its job-detail fields. Another page uses the first schema.org JobPosting, or the page's paragraphs when that object is absent. It does not read `.env` and it does not use the refresh token.
 
 ```bash
 docs-cli parse --html PATH

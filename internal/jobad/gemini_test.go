@@ -581,7 +581,15 @@ func TestCollectBlocks(t *testing.T) {
 		t.Fatalf("collected header, warning, or email: %s", blob)
 	}
 
-	_, err = CollectBlocks([]byte(`<p>no ad</p>`))
+	plain, err := CollectBlocks([]byte(`<p>no ad</p>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain) != 1 || plain[0].Text != "no ad" {
+		t.Fatalf("plain blocks = %#v", plain)
+	}
+
+	_, err = CollectBlocks([]byte(`<div>no ad</div>`))
 	if !errors.Is(err, ErrJobAdDetailsNotFound) || err.Error() != errGeminiBlocks.Error() {
 		t.Fatalf("err = %v", err)
 	}
@@ -623,6 +631,88 @@ func TestCollectBlocksMatchPhraseItems(t *testing.T) {
 	if strings.Contains(blob, "Applications submitted without expected salary") || strings.Contains(blob, "example.com") {
 		t.Fatalf("warning or email collected: %s", blob)
 	}
+}
+
+func TestCollectBlocksOtherSource(t *testing.T) {
+	page := `<title>System Analyst at CTgoodjobs</title>
+<script>loginId</script>
+<script type="application/ld+json">` + jsonLD(t, map[string]any{
+		"@type": "JobPosting",
+		"title": "System Analyst",
+		"hiringOrganization": map[string]any{
+			"name": "Acme Ltd",
+		},
+		"description": `<p><strong>Key Responsibilities</strong></p><ul><li>Build the API</li></ul><p><strong>Requirements</strong></p><ul><li>Know Go</li></ul><p>Apply on the site</p>`,
+	}) + `</script>`
+	blocks, err := CollectBlocks([]byte(page))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(blocks))
+	for i, block := range blocks {
+		got[i] = block.Heading + " | " + block.Text
+	}
+	want := []string{
+		"Key Responsibilities | Build the API",
+		"Requirements | Know Go",
+		"Requirements | Apply on the site",
+	}
+	if join(got) != join(want) {
+		t.Fatalf("blocks = %#v", got)
+	}
+	blob := join(got)
+	for _, leak := range []string{"CTgoodjobs", "loginId", "Acme Ltd", "<script", "System Analyst"} {
+		if strings.Contains(blob, leak) {
+			t.Fatalf("block text contains %s: %s", leak, blob)
+		}
+	}
+
+	body := `<title>Site Name</title>
+<nav><p>NAV-P</p><ul><li>NAV-LI</li></ul></nav>
+<header><p>HEAD-P</p></header>
+<footer><li>FOOT-LI</li></footer>
+<div role="navigation"><p>ROLE-P</p></div>
+<p><strong>Key Responsibilities</strong></p>
+<ul><li>Ship the work</li></ul>`
+	blocks, err = CollectBlocks([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || blocks[0].Text != "Ship the work" {
+		t.Fatalf("body blocks = %#v", blocks)
+	}
+	blob = blocks[0].Heading + blocks[0].Text
+	for _, leak := range []string{"NAV-P", "NAV-LI", "HEAD-P", "FOOT-LI", "ROLE-P", "Site Name"} {
+		if strings.Contains(blob, leak) {
+			t.Fatalf("chrome in blocks: %s", blob)
+		}
+	}
+
+	dom := `<script type="application/ld+json">` + jsonLD(t, map[string]any{
+		"@type":       "JobPosting",
+		"title":       "From JSON",
+		"description": "<ul><li>FROM-JSON</li></ul>",
+	}) + `</script>
+<div data-automation="jobAdDetails">
+<p><strong>Job Description</strong></p>
+<ul><li>FROM-DOM</li></ul>
+</div>`
+	blocks, err = CollectBlocks([]byte(dom))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || blocks[0].Text != "FROM-DOM" {
+		t.Fatalf("jobsdb blocks = %#v", blocks)
+	}
+}
+
+func jsonLD(t *testing.T, v any) string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 func phraseDoc() Document {

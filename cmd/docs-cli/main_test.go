@@ -1583,6 +1583,129 @@ func TestParsePromptsThenMaps(t *testing.T) {
 	})
 }
 
+func TestParseOtherSource(t *testing.T) {
+	const apiKey = "other-source-gemini-key"
+	const work = `[ "TEMPORARY", "CONTRACTOR" ]`
+	posting, err := json.Marshal(map[string]any{
+		"@type": "JobPosting",
+		"title": "System Analyst",
+		"hiringOrganization": map[string]any{
+			"name": "Acme Ltd",
+		},
+		"jobLocation":    []any{map[string]any{"address": map[string]any{"addressLocality": "Wan Chai"}}},
+		"employmentType": work,
+		"description": `<p><strong>Benefits</strong></p><ul><li>Medical cover</li></ul>` +
+			`<p><strong>Key Responsibilities</strong></p><ul><li>Build the API</li></ul>` +
+			`<p><strong>Requirements</strong></p><ul><li>Know Go</li></ul>` +
+			`<p>Apply on the site</p>`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := []byte(`<title>System Analyst at CTgoodjobs</title><script>loginId</script><script type="application/ld+json">` + string(posting) + `</script>`)
+	path := writeFile(t, "other.html", page)
+	phrase := phraseJSON(t, page, path)
+
+	t.Run("no key keeps phrase json", func(t *testing.T) {
+		keyring.MockInit()
+		stdout, stderr, code := runParseArgs(t, []string{"parse", "--html", path}, nil)
+		if code != 0 || stdout != phrase || stderr != errGeminiKeyMissing+"\n" {
+			t.Fatalf("exit %d stdout %s stderr %q", code, stdout, stderr)
+		}
+		if strings.Contains(stdout, "CTgoodjobs") || strings.Contains(stdout, "loginId") {
+			t.Fatalf("stdout %s", stdout)
+		}
+	})
+
+	t.Run("exact partition replaces lists", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		reply := geminiReply(t, []string{"Medical cover"}, []string{"Build the API"}, []string{"Know Go"}, []string{"Apply on the site"})
+		cap := &geminiCapture{}
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"parse", "--html", path}, deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			GeminiClient: mappingClient(t, http.StatusOK, reply, cap),
+		})
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("exit %d stderr %q", code, stderr.String())
+		}
+		var got jobad.Document
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Source != path || got.Header.TitleBlock != "System Analyst" || got.Header.Company != "Acme Ltd" || got.Header.Location != "Wan Chai" || got.Header.WorkType != work {
+			t.Fatalf("header %+v source %q", got.Header, got.Source)
+		}
+		if strings.Join(got.Benefits, "|") != "Medical cover" || strings.Join(got.Duties, "|") != "Build the API" || strings.Join(got.Requirements, "|") != "Know Go" || strings.Join(got.Trailer, "|") != "Apply on the site" {
+			t.Fatalf("lists %+v", got)
+		}
+		if strings.Contains(cap.body, "<script") || strings.Contains(cap.body, apiKey) || strings.Contains(cap.body, "loginId") || strings.Contains(cap.body, "Acme Ltd") || strings.Contains(cap.body, "Wan Chai") || strings.Contains(cap.body, "TEMPORARY") || strings.Contains(cap.url, apiKey) {
+			t.Fatalf("request url %s body %s", cap.url, cap.body)
+		}
+		if !strings.Contains(cap.url, "generativelanguage.googleapis.com") || !strings.Contains(cap.url, "gemini-3.1-flash-lite") || strings.Contains(cap.url, "aiplatform.googleapis.com") {
+			t.Fatalf("url %s", cap.url)
+		}
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+	})
+
+	t.Run("rewritten sentence keeps phrase json", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		reply := geminiReply(t, []string{"Great medical cover"}, nil, nil, nil)
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"parse", "--html", path}, deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			GeminiClient: mappingClient(t, http.StatusOK, reply, &geminiCapture{}),
+		})
+		want := "docs-cli: gemini mapping rejected: partition\n" +
+			"docs-cli: gemini mapping rejected: sent=4 reply=1 missing=4 extra=1\n" +
+			"docs-cli: gemini mapping rejected: missing: Medical cover\n" +
+			"docs-cli: gemini mapping rejected: missing: Build the API\n" +
+			"docs-cli: gemini mapping rejected: missing: Know Go\n" +
+			"docs-cli: gemini mapping rejected: extra: Great medical cover\n"
+		if code != 0 || stdout.String() != phrase || stderr.String() != want {
+			t.Fatalf("exit %d stdout %s stderr %q", code, stdout.String(), stderr.String())
+		}
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+	})
+
+	t.Run("header only does not call gemini", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		only, err := json.Marshal(map[string]any{"@type": "JobPosting", "title": "Only Title"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		onlyPage := []byte(`<title>CTgoodjobs</title><script type="application/ld+json">` + string(only) + `</script>`)
+		onlyPath := writeFile(t, "header.html", onlyPage)
+		stdout, stderr, code := runParseArgs(t, []string{"parse", "--html", onlyPath}, nil)
+		if code != 0 || stderr != "" {
+			t.Fatalf("exit %d stderr %q stdout %s", code, stderr, stdout)
+		}
+		var got jobad.Document
+		if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Source != onlyPath || got.Header.TitleBlock != "Only Title" || len(got.Benefits) != 0 || len(got.Duties) != 0 || len(got.Requirements) != 0 || len(got.Trailer) != 0 {
+			t.Fatalf("doc %+v", got)
+		}
+		if strings.Contains(stdout, "CTgoodjobs") || !strings.Contains(stdout, `"benefits": []`) {
+			t.Fatalf("stdout %s", stdout)
+		}
+	})
+}
+
 func runParseArgs(t *testing.T, args []string, tty config.TTY) (string, string, int) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer

@@ -1,4 +1,4 @@
-// Package jobad extracts a saved JobsDB job page into section JSON.
+// Package jobad extracts a saved job page into section JSON.
 package jobad
 
 import (
@@ -9,9 +9,11 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
 )
 
-// ErrJobAdDetailsNotFound is returned when the page has no jobAdDetails node.
+// ErrJobAdDetailsNotFound is returned when the page has no jobAdDetails and
+// no other-source header or blocks. The text stays this sentence.
 var ErrJobAdDetailsNotFound = errors.New("jobad: jobAdDetails not found")
 
 // Document is the extraction JSON. Source stays empty; the CLI fills it.
@@ -25,7 +27,8 @@ type Document struct {
 	Trailer      []string `json:"trailer"`
 }
 
-// Header is the visible text of the job-detail and advertiser-name nodes.
+// Header is the job title line. A JobsDB page reads the job-detail and
+// advertiser-name nodes. Another page reads the first schema.org JobPosting.
 type Header struct {
 	TitleBlock     string `json:"title_block"`
 	Company        string `json:"company"`
@@ -66,32 +69,49 @@ func (d *Document) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Parse builds a Document from a JobsDB HTML page.
+// Parse builds a Document from a saved job HTML page.
+// A page with jobAdDetails uses that element and ignores JSON-LD.
 // Lists are empty slices, never nil. Source is left empty.
 func Parse(page []byte) (Document, error) {
 	root, err := html.Parse(strings.NewReader(string(page)))
 	if err != nil {
 		return Document{}, err
 	}
-	doc := Document{
+	return parseRoot(root)
+}
+
+func emptyDocument() Document {
+	return Document{
 		Benefits:     []string{},
 		Duties:       []string{},
 		Requirements: []string{},
 		Trailer:      []string{},
 	}
-	doc.Header = Header{
-		TitleBlock:     textOf(findAutomation(root, "job-detail-title")),
-		Company:        textOf(findAutomation(root, "advertiser-name")),
-		Location:       textOf(findAutomation(root, "job-detail-location")),
-		WorkType:       textOf(findAutomation(root, "job-detail-work-type")),
-		Classification: textOf(findAutomation(root, "job-detail-classifications")),
-	}
-	redactHeader(&doc.Header)
-	body := findAutomation(root, "jobAdDetails")
-	if body == nil {
+}
+
+func parseRoot(root *html.Node) (Document, error) {
+	doc := emptyDocument()
+	scope, ok := locate(root)
+	if !ok {
 		return Document{}, ErrJobAdDetailsNotFound
 	}
-	walk(body, "", &doc)
+	doc.Header = scope.header
+	redactHeader(&doc.Header)
+	if scope.node != nil {
+		// Body text before a recognized heading is trailer. Chrome subtrees
+		// are already skipped, so the remaining paragraphs are the ad.
+		section := ""
+		if scope.body {
+			section = sectionGap
+		}
+		walk(scope.node, section, &doc, scope.skipChrome)
+	}
+	if scope.jobsdb {
+		return doc, nil
+	}
+	if !headerFilled(doc.Header) && sectionsEmpty(doc) {
+		return Document{}, ErrJobAdDetailsNotFound
+	}
 	return doc, nil
 }
 
@@ -103,8 +123,245 @@ func redactHeader(h *Header) {
 	h.Classification = redact(h.Classification)
 }
 
-func walk(n *html.Node, section string, doc *Document) string {
+// contentScope is the node Parse and CollectBlocks walk.
+// jobsdb ignores JSON-LD. body walks p and li outside chrome.
+// A JSON-LD posting may have a nil node when description has no fragment.
+type contentScope struct {
+	node       *html.Node
+	header     Header
+	jobsdb     bool
+	body       bool
+	skipChrome bool
+}
+
+func locate(root *html.Node) (contentScope, bool) {
+	if n := findAutomation(root, "jobAdDetails"); n != nil {
+		return contentScope{node: n, header: automationHeader(root), jobsdb: true}, true
+	}
+	if obj := firstJobPosting(root); obj != nil {
+		return contentScope{node: descriptionFragment(obj), header: headerFromPosting(obj)}, true
+	}
+	if n := findElement(root, "body"); n != nil {
+		return contentScope{node: n, body: true, skipChrome: true}, true
+	}
+	return contentScope{}, false
+}
+
+func automationHeader(root *html.Node) Header {
+	return Header{
+		TitleBlock:     textOf(findAutomation(root, "job-detail-title")),
+		Company:        textOf(findAutomation(root, "advertiser-name")),
+		Location:       textOf(findAutomation(root, "job-detail-location")),
+		WorkType:       textOf(findAutomation(root, "job-detail-work-type")),
+		Classification: textOf(findAutomation(root, "job-detail-classifications")),
+	}
+}
+
+func headerFilled(h Header) bool {
+	return h.TitleBlock != "" || h.Company != "" || h.Location != "" || h.WorkType != "" || h.Classification != ""
+}
+
+func sectionsEmpty(doc Document) bool {
+	return len(doc.Benefits) == 0 && len(doc.Duties) == 0 && len(doc.Requirements) == 0 && len(doc.Trailer) == 0
+}
+
+func firstJobPosting(n *html.Node) map[string]any {
+	if n == nil {
+		return nil
+	}
+	if n.Type == html.ElementNode && n.Data == "script" && strings.EqualFold(strings.TrimSpace(attr(n, "type")), "application/ld+json") {
+		var v any
+		if err := json.Unmarshal([]byte(nodeText(n)), &v); err == nil {
+			if obj := jobPostingIn(v); obj != nil {
+				return obj
+			}
+		}
+		return nil
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if obj := firstJobPosting(c); obj != nil {
+			return obj
+		}
+	}
+	return nil
+}
+
+func nodeText(n *html.Node) string {
+	var b strings.Builder
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.TextNode {
+			b.WriteString(c.Data)
+		}
+	}
+	return b.String()
+}
+
+// jobPostingIn returns the first @type JobPosting in an object, an array,
+// or an object's @graph array. Other nested keys are not searched.
+func jobPostingIn(v any) map[string]any {
+	switch node := v.(type) {
+	case map[string]any:
+		if typeHas(node["@type"], "JobPosting") {
+			return node
+		}
+		if graph, ok := node["@graph"].([]any); ok {
+			return jobPostingIn(graph)
+		}
+	case []any:
+		for _, item := range node {
+			if obj := jobPostingIn(item); obj != nil {
+				return obj
+			}
+		}
+	}
+	return nil
+}
+
+func typeHas(v any, want string) bool {
+	switch t := v.(type) {
+	case string:
+		return t == want
+	case []any:
+		for _, item := range t {
+			if s, ok := item.(string); ok && s == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func headerFromPosting(obj map[string]any) Header {
+	var h Header
+	if s, ok := obj["title"].(string); ok {
+		h.TitleBlock = collapseSpace(s)
+	}
+	if org, ok := obj["hiringOrganization"].(map[string]any); ok {
+		if s, ok := org["name"].(string); ok {
+			h.Company = collapseSpace(s)
+		}
+	}
+	h.Location = postingLocation(obj["jobLocation"])
+	h.WorkType = postingWorkType(obj["employmentType"])
+	if s, ok := obj["occupationalCategory"].(string); ok {
+		h.Classification = collapseSpace(s)
+	}
+	return h
+}
+
+func collapseSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// postingWorkType keeps a string as trimmed text. A string that looks like
+// JSON is not decoded. A string array is joined in order with ", ".
+func postingWorkType(v any) string {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case []any:
+		parts := make([]string, 0, len(t))
+		for _, item := range t {
+			s, ok := item.(string)
+			if !ok {
+				return ""
+			}
+			parts = append(parts, strings.TrimSpace(s))
+		}
+		return strings.Join(parts, ", ")
+	default:
+		return ""
+	}
+}
+
+func postingLocation(v any) string {
+	place := firstObject(v)
+	if place == nil {
+		return ""
+	}
+	addr, _ := place["address"].(map[string]any)
+	if addr == nil {
+		return ""
+	}
+	for _, key := range []string{"addressLocality", "streetAddress", "addressRegion"} {
+		s, ok := addr[key].(string)
+		if !ok {
+			continue
+		}
+		if s = collapseSpace(s); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func firstObject(v any) map[string]any {
+	switch t := v.(type) {
+	case map[string]any:
+		return t
+	case []any:
+		for _, item := range t {
+			if obj, ok := item.(map[string]any); ok {
+				return obj
+			}
+		}
+	}
+	return nil
+}
+
+func descriptionFragment(obj map[string]any) *html.Node {
+	raw, ok := obj["description"].(string)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	nodes, err := html.ParseFragment(strings.NewReader(raw), &html.Node{
+		Type:     html.ElementNode,
+		Data:     "body",
+		DataAtom: atom.Body,
+	})
+	if err != nil || len(nodes) == 0 {
+		return nil
+	}
+	parent := &html.Node{Type: html.ElementNode, Data: "div"}
+	for _, n := range nodes {
+		parent.AppendChild(n)
+	}
+	return parent
+}
+
+func findElement(n *html.Node, tag string) *html.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Type == html.ElementNode && n.Data == tag {
+		return n
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := findElement(c, tag); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func chrome(n *html.Node) bool {
+	switch n.Data {
+	case "nav", "header", "footer":
+		return true
+	}
+	for _, part := range strings.Fields(attr(n, "role")) {
+		if strings.EqualFold(part, "navigation") {
+			return true
+		}
+	}
+	return false
+}
+
+func walk(n *html.Node, section string, doc *Document, skipChrome bool) string {
 	if n.Type == html.ElementNode {
+		if skipChrome && chrome(n) {
+			return section
+		}
 		switch n.Data {
 		case "script", "style", "svg":
 			return section
@@ -123,16 +380,16 @@ func walk(n *html.Node, section string, doc *Document) string {
 			}
 			return section
 		case "p":
-			return walkP(n, section, doc)
+			return walkP(n, section, doc, skipChrome)
 		}
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		section = walk(c, section, doc)
+		section = walk(c, section, doc, skipChrome)
 	}
 	return section
 }
 
-func walkP(n *html.Node, section string, doc *Document) string {
+func walkP(n *html.Node, section string, doc *Document, skipChrome bool) string {
 	norm := normalizeHeading(textOf(n))
 	if utf8.RuneCountInString(norm) <= maxHeadingRunes {
 		if kind, ok := classify(norm); ok {
@@ -141,7 +398,7 @@ func walkP(n *html.Node, section string, doc *Document) string {
 	}
 	if containsSectionStrong(n) {
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			section = walk(c, section, doc)
+			section = walk(c, section, doc, skipChrome)
 		}
 		return section
 	}
@@ -150,7 +407,7 @@ func walkP(n *html.Node, section string, doc *Document) string {
 		return section
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		section = walk(c, section, doc)
+		section = walk(c, section, doc, skipChrome)
 	}
 	return section
 }
