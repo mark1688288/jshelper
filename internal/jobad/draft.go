@@ -37,8 +37,8 @@ var ErrFMArgLimit = errors.New("docs-cli: fm text exceeds the argument limit")
 var ErrDraftSchema = errors.New("docs-cli: fm output is not the draft schema")
 
 // DraftInstructions is the fm --instructions argument for a cover letter.
-// One prompt drafts the whole letter. The bytes match design PR 22.
-const DraftInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. Keep the template's language, salutation shape, closing, and paragraph shape. Keep an applicant name or contact line only when the template gives that line as real text. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, and Requirements. Title is the role being applied for, not the applicant's current job. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, and do not use an employer from the template's previous role. When Company is (none), do not invent an employer and do not write (none) into the letter. Rewrite the body for this job's Duties and Requirements. Do not invent a recipient, job board, compliment, current job title, degree, date, or years of experience that appears in neither the template nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
+// One prompt drafts the whole letter. The bytes match design PR 23.
+const DraftInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. The template's line breaks are PDF extraction artifacts, not the letter's layout. Do not copy them. Do not put each word on its own line, and do not write a line that is only a space. Write a normal cover letter: a salutation on one line, then body paragraphs of complete sentences, with several sentences in each paragraph and one blank line between paragraphs, then a closing on one line. Keep the template's language. Keep an applicant name or contact line only when the template gives that line as real text. When a real contact line is kept, put that line on its own line. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, and Requirements. Title is the role being applied for, not the applicant's current job. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, and do not use an employer from the template's previous role. When Company is (none), do not invent an employer and do not write (none) into the letter. Rewrite the body for this job's Duties and Requirements. Do not invent a recipient, job board, compliment, current job title, degree, date, or years of experience that appears in neither the template nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
 
 // LetterSchema is the fm --schema argument accepted on 2026-10-02.
 // It is the compact byte string, not the pretty-printed object dialect.
@@ -106,7 +106,7 @@ func CheckDraftRequirements(doc Document) error {
 
 // DraftPrompt builds the fm --text value for a cover letter.
 // Order is Title, Company, Duties, Requirements, Template.
-// templateText is copied unchanged. Job emails are removed.
+// Template text is reflowed and is not redacted. Job emails are removed.
 // An empty company prints (none). An empty requirements list returns ErrRequirementsEmpty.
 func DraftPrompt(doc Document, templateText string) (string, error) {
 	if err := CheckDraftRequirements(doc); err != nil {
@@ -121,8 +121,84 @@ func DraftPrompt(doc Document, templateText string) (string, error) {
 	writeBlock(&b, "Company:", company)
 	writeBlock(&b, "Duties:", listBody(promptLines(doc.Duties)))
 	writeBlock(&b, "Requirements:", listBody(promptLines(doc.Requirements)))
-	writeBlock(&b, "Template:", templateText)
+	writeBlock(&b, "Template:", reflowTemplate(templateText))
 	return b.String(), nil
+}
+
+type templateLine int
+
+const (
+	templateSpacer templateLine = iota
+	templateFragment
+	templateProse
+)
+
+func classifyTemplateLine(line string) templateLine {
+	if strings.TrimSpace(line) == "" {
+		return templateSpacer
+	}
+	if len(strings.Fields(line)) == 1 {
+		return templateFragment
+	}
+	return templateProse
+}
+
+func collapseSpace(line string) string {
+	return strings.Join(strings.Fields(line), " ")
+}
+
+// reflowTemplate joins a run of one-word lines into one line.
+// Blank lines inside that run are not paragraph breaks.
+// Blank lines outside a run become one blank line.
+// Leading and trailing blank lines are dropped. There is no trailing newline.
+// The text is not redacted.
+func reflowTemplate(raw string) string {
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	raw = strings.ReplaceAll(raw, "\r", "\n")
+	lines := strings.Split(raw, "\n")
+
+	var out []string
+	emitted := false
+	blankPending := false
+	emit := func(line string) {
+		if emitted && blankPending {
+			out = append(out, "")
+		}
+		out = append(out, line)
+		emitted = true
+		blankPending = false
+	}
+
+	for i := 0; i < len(lines); {
+		switch classifyTemplateLine(lines[i]) {
+		case templateSpacer:
+			if emitted {
+				blankPending = true
+			}
+			i++
+		case templateFragment:
+			words := []string{collapseSpace(lines[i])}
+			j := i + 1
+			for {
+				k := j
+				for k < len(lines) && classifyTemplateLine(lines[k]) == templateSpacer {
+					k++
+				}
+				if k < len(lines) && classifyTemplateLine(lines[k]) == templateFragment {
+					words = append(words, collapseSpace(lines[k]))
+					j = k + 1
+					continue
+				}
+				break
+			}
+			emit(strings.Join(words, " "))
+			i = j
+		default:
+			emit(collapseSpace(lines[i]))
+			i++
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // Draft calls fm available, then fm respond, and returns the letter.
