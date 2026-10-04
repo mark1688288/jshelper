@@ -11,10 +11,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
@@ -33,10 +35,25 @@ func TestMain(m *testing.M) {
 	jobad.SetFMExecForTest(func([]string) ([]byte, []byte, int) {
 		return nil, []byte("fm exec not stubbed"), 1
 	})
+	dir, err := os.MkdirTemp("", "docs-cli-draft-root-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "docs-cli: draft root: %v\n", err)
+		os.Exit(1)
+	}
+	testDraftRoot = dir
+	SetDraftRootForTest(testDraftRoot)
 	code := m.Run()
+	SetDraftRootForTest("")
 	jobad.SetFMExecForTest(nil)
 	keyring.MockRestore()
+	_ = os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+var testDraftRoot string
+
+func restoreDraftRoot() {
+	SetDraftRootForTest(testDraftRoot)
 }
 
 func TestRun(t *testing.T) {
@@ -1852,6 +1869,607 @@ func TestAnalyzeJSONTooLarge(t *testing.T) {
 			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 		}
 	})
+}
+
+func TestDraftCommandFakeFM(t *testing.T) {
+	keyring.MockInit()
+	const apiKey = "draft-must-not-read-key"
+	if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobad.StoreGeminiKey(apiKey); err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	t.Chdir(work)
+
+	doc := jobad.Document{
+		Source: "source-token-9f3a.html",
+		Header: jobad.Header{
+			TitleBlock:     "System Analyst",
+			Company:        "COMPANY-TOKEN",
+			Location:       "LOCATION-TOKEN",
+			WorkType:       "WORKTYPE-TOKEN",
+			Classification: "CLASS-TOKEN",
+		},
+		Benefits:     []string{"BENEFITS-TOKEN"},
+		Duties:       []string{},
+		Requirements: []string{"person@example.com", "Know Go"},
+		Trailer:      []string{"TRAILER-SENTINEL"},
+	}
+
+	t.Run("keeps trailing newlines", func(t *testing.T) {
+		root := t.TempDir()
+		entries, err := os.ReadDir(root)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("program dir %v err %v", entries, err)
+		}
+		template := writeDraftEmailPDF(t)
+		path := writeJobJSON(t, doc)
+		var calls [][]string
+		scriptedFM(t, &calls,
+			fmStep{stdout: "not-a-letter", stderr: "available noise"},
+			fmStep{stdout: "{\"letter\":\"hi\\n\\n\"}\n", stderr: "respond noise"},
+		)
+		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		if code != 0 || stderr != "" {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		gotPath := strings.TrimSuffix(stdout, "\n")
+		if stdout != gotPath+"\n" || !filepath.IsAbs(gotPath) {
+			t.Fatalf("stdout %q", stdout)
+		}
+		if strings.Contains(stdout, "hi\n\n") || strings.Contains(stdout, "{") {
+			t.Fatalf("stdout contains the letter %q", stdout)
+		}
+		drafts := filepath.Join(root, "drafts")
+		if filepath.Dir(gotPath) != drafts {
+			t.Fatalf("path %s drafts %s", gotPath, drafts)
+		}
+		info, err := os.Stat(drafts)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Fatalf("drafts mode %v err %v", info, err)
+		}
+		body, err := os.ReadFile(gotPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != "hi\n\n" {
+			t.Fatalf("letter %q", body)
+		}
+		fileInfo, err := os.Stat(gotPath)
+		if err != nil || fileInfo.Mode().Perm() != 0o600 {
+			t.Fatalf("file mode %v err %v", fileInfo, err)
+		}
+		names, err := os.ReadDir(drafts)
+		if err != nil || len(names) != 1 || names[0].Name() != filepath.Base(gotPath) {
+			t.Fatalf("drafts %#v err %v", names, err)
+		}
+		if ok, _ := regexp.MatchString(`^\d{8}T\d{6}\.\d{3}\.txt$`, names[0].Name()); !ok {
+			t.Fatalf("name %s", names[0].Name())
+		}
+		if len(calls) != 2 || !slices.Equal(calls[0], []string{"/usr/bin/fm", "available"}) {
+			t.Fatalf("calls %#v", calls)
+		}
+		prefix := []string{
+			"/usr/bin/fm", "respond", "--no-stream", "--use-case", "general",
+			"--instructions", jobad.DraftInstructions,
+			"--schema", jobad.LetterSchema,
+			"--text",
+		}
+		if len(calls[1]) != len(prefix)+1 || !slices.Equal(calls[1][:len(prefix)], prefix) {
+			t.Fatalf("respond %#v", calls[1])
+		}
+		text := calls[1][len(calls[1])-1]
+		if !strings.Contains(text, "ada@example.com") || !strings.Contains(text, "Know Go") {
+			t.Fatalf("text %q", text)
+		}
+		if !strings.Contains(text, "Duties:\n(none)") {
+			t.Fatalf("text %q", text)
+		}
+		for _, banned := range []string{
+			apiKey, "person@example.com", "TRAILER-SENTINEL", "BENEFITS-TOKEN",
+			"COMPANY-TOKEN", "LOCATION-TOKEN", "WORKTYPE-TOKEN", "CLASS-TOKEN", doc.Source,
+			jobad.AnalysisSchema,
+		} {
+			if strings.Contains(text, banned) {
+				t.Fatalf("text contains %q", banned)
+			}
+		}
+		assertNoSecret(t, stdout, stderr, apiKey)
+		assertRefreshUntouched(t)
+		raw, err := keyring.Get("docs-cli", "gemini-api-key")
+		if err != nil || raw != `{"api_key":"`+apiKey+`"}` {
+			t.Fatalf("gemini key %q err %v", raw, err)
+		}
+		workEntries, err := os.ReadDir(work)
+		if err != nil || len(workEntries) != 0 {
+			t.Fatalf("workdir %#v err %v", workEntries, err)
+		}
+	})
+
+	t.Run("adds a newline", func(t *testing.T) {
+		root := t.TempDir()
+		template := writeDraftEmailPDF(t)
+		path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: `{"letter":"Hi there"}`})
+		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		if code != 0 || stderr != "" {
+			t.Fatalf("exit %d stderr %q", code, stderr)
+		}
+		gotPath := strings.TrimSuffix(stdout, "\n")
+		body, err := os.ReadFile(gotPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != "Hi there\n" || strings.Contains(stdout, "Hi there") {
+			t.Fatalf("body %q stdout %q", body, stdout)
+		}
+	})
+
+	t.Run("existing name", func(t *testing.T) {
+		root := t.TempDir()
+		fixed := time.Date(2026, 10, 3, 15, 4, 5, 123_000_000, time.Local)
+		prev := draftClock
+		draftClock = func() time.Time { return fixed }
+		t.Cleanup(func() { draftClock = prev })
+		stamp := fixed.Local().Format("20060102T150405.000")
+		drafts := filepath.Join(root, "drafts")
+		if err := os.MkdirAll(drafts, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		kept := filepath.Join(drafts, stamp+".txt")
+		if err := os.WriteFile(kept, []byte("kept\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		template := writeDraftEmailPDF(t)
+		path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: "{\"letter\":\"hi\\n\\n\"}\n"})
+		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		if code != 0 || stderr != "" {
+			t.Fatalf("exit %d stderr %q", code, stderr)
+		}
+		gotPath := strings.TrimSuffix(stdout, "\n")
+		if filepath.Base(gotPath) != stamp+"-2.txt" {
+			t.Fatalf("name %s", gotPath)
+		}
+		body, err := os.ReadFile(gotPath)
+		if err != nil || string(body) != "hi\n\n" {
+			t.Fatalf("body %q err %v", body, err)
+		}
+		old, err := os.ReadFile(kept)
+		if err != nil || string(old) != "kept\n" {
+			t.Fatalf("kept %q err %v", old, err)
+		}
+	})
+}
+
+func TestDraftUsesWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	SetDraftRootForTest("")
+	t.Cleanup(restoreDraftRoot)
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := writeDraftEmailPDF(t)
+	var calls [][]string
+	scriptedFM(t, &calls, fmStep{}, fmStep{stdout: `{"letter":"Hi there"}`})
+	stdout, stderr, code := runDraftArgs(t, "", path, template)
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+	}
+	gotPath := strings.TrimSuffix(stdout, "\n")
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	drafts := filepath.Join(wd, "drafts")
+	if filepath.Dir(gotPath) != drafts {
+		t.Fatalf("path %s want %s", gotPath, drafts)
+	}
+	body, err := os.ReadFile(gotPath)
+	if err != nil || string(body) != "Hi there\n" {
+		t.Fatalf("body %q err %v", body, err)
+	}
+}
+
+func TestDraftEmptyRequirementsBeforeTemplate(t *testing.T) {
+	rejectFM(t)
+	docs := []jobad.Document{
+		{},
+		{Requirements: []string{}, Duties: []string{"Build services"}},
+		{Requirements: []string{"person@example.com"}},
+	}
+	for _, doc := range docs {
+		root := t.TempDir()
+		template := filepath.Join(t.TempDir(), "template-not-opened.pdf")
+		path := writeJobJSON(t, doc)
+		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		if code != 1 || stdout != "" || stderr != "docs-cli: requirements is empty\n" {
+			t.Fatalf("doc %#v exit %d stdout %q stderr %q", doc.Requirements, code, stdout, stderr)
+		}
+		if strings.Contains(stderr, "template-not-opened.pdf") {
+			t.Fatalf("stderr %q", stderr)
+		}
+		assertDraftsEmpty(t, root)
+	}
+}
+
+func TestDraftMissingJSONBeforeTemplate(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	jsonPath := filepath.Join(t.TempDir(), "missing.json")
+	template := filepath.Join(t.TempDir(), "template-not-opened.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, jsonPath, template)
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || !strings.Contains(stderr, jsonPath) {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, template) || strings.Contains(stderr, "template has no text") {
+		t.Fatalf("stderr %q", stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftInvalidJSONBeforeTemplate(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	jsonPath := writeFile(t, "bad.json", []byte("{"))
+	template := filepath.Join(t.TempDir(), "template-not-opened.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, jsonPath, template)
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || !strings.Contains(stderr, jsonPath) {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, template) {
+		t.Fatalf("stderr %q", stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftTemplateTooLarge(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := writeFile(t, "over.bin", bytes.Repeat([]byte{'x'}, maxJSONBytes+1))
+	stdout, stderr, code := runDraftArgs(t, root, path, template)
+	if code != 1 || stdout != "" || stderr != "docs-cli: template exceeds 1 MiB\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftTemplateNoText(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := writeFile(t, "note.txt", []byte("not a pdf"))
+	stdout, stderr, code := runDraftArgs(t, root, path, template)
+	if code != 1 || stdout != "" || stderr != "docs-cli: template has no text\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftTemplateNotRegular(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := t.TempDir()
+	stdout, stderr, code := runDraftArgs(t, root, path, template)
+	if code != 1 || stdout != "" || stderr != "docs-cli: template has no text\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftTemplateMissing(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := filepath.Join(t.TempDir(), "missing.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, path, template)
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || !strings.Contains(stderr, template) {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, "template has no text") {
+		t.Fatalf("stderr %q", stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftArgLimit(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	doc := jobad.Document{Requirements: []string{strings.Repeat("Q", 917000), "Know Go"}}
+	path := writeJobJSON(t, doc)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() >= int64(maxJSONBytes) || info.Size() <= 917000 {
+		t.Fatalf("json size %d", info.Size())
+	}
+	stdout, stderr, code := runDraftArgs(t, root, path, coverMinPath(t))
+	if code != 1 || stdout != "" || stderr != "docs-cli: fm text exceeds the argument limit\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftFMAvailableFails(t *testing.T) {
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := writeDraftEmailPDF(t)
+
+	t.Run("available", func(t *testing.T) {
+		root := t.TempDir()
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: `{"letter":"hi"}`, stderr: "not licensed\n", code: 1})
+		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		if code != 1 || stdout != "" || stderr != "docs-cli: fm: not licensed\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(calls) != 1 || !slices.Equal(calls[0], []string{"/usr/bin/fm", "available"}) {
+			t.Fatalf("calls %#v", calls)
+		}
+		assertDraftsEmpty(t, root)
+	})
+
+	t.Run("respond", func(t *testing.T) {
+		root := t.TempDir()
+		var calls [][]string
+		scriptedFM(t, &calls,
+			fmStep{},
+			fmStep{stdout: `{"letter":"hi"}`, stderr: "guardrail rejected\n", code: 1},
+		)
+		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		if code != 1 || stdout != "" || stderr != "docs-cli: fm: guardrail rejected\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(calls) != 2 || calls[1][1] != "respond" {
+			t.Fatalf("calls %#v", calls)
+		}
+		assertDraftsEmpty(t, root)
+	})
+}
+
+func TestDraftRejectsModelProse(t *testing.T) {
+	root := t.TempDir()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := writeDraftEmailPDF(t)
+	var calls [][]string
+	scriptedFM(t, &calls, fmStep{}, fmStep{stdout: "The letter is ready.\n"})
+	stdout, stderr, code := runDraftArgs(t, root, path, template)
+	if code != 1 || stdout != "" || stderr != "docs-cli: fm output is not the draft schema\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if len(calls) != 2 || calls[1][1] != "respond" {
+		t.Fatalf("calls %#v", calls)
+	}
+	if strings.Contains(stdout+stderr, "The letter is ready.") {
+		t.Fatalf("forwarded model text stdout %q stderr %q", stdout, stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftUsage(t *testing.T) {
+	const leaked = "super-secret-gemini-key"
+	rejectFM(t)
+	for _, tt := range draftUsageCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			keyring.MockInit()
+			root := t.TempDir()
+			SetDraftRootForTest(root)
+			t.Cleanup(restoreDraftRoot)
+			var stdout, stderr bytes.Buffer
+			code := run(tt.args, deps{
+				Stdin:  strings.NewReader(leaked),
+				Stdout: &stdout,
+				Stderr: &stderr,
+			})
+			if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "usage: docs-cli") {
+				t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+			}
+			if tt.exact && stderr.String() != usageText {
+				t.Fatalf("stderr %q", stderr.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), leaked) {
+				t.Fatal("leaked the key")
+			}
+			if _, err := keyring.Get("docs-cli", "gemini-api-key"); !errors.Is(err, keyring.ErrNotFound) {
+				t.Fatalf("keyring err %v", err)
+			}
+		})
+	}
+	if !strings.Contains(usageText, "\n  analyze --json PATH\n  draft --json PATH --template PATH\n") {
+		t.Fatalf("usage commands:\n%s", usageText)
+	}
+}
+
+func TestDraftUsageDoesNotCreateDrafts(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	SetDraftRootForTest(root)
+	t.Cleanup(restoreDraftRoot)
+	for _, tt := range draftUsageCases() {
+		var stdout, stderr bytes.Buffer
+		code := run(tt.args, deps{
+			Stdin:  strings.NewReader(""),
+			Stdout: &stdout,
+			Stderr: &stderr,
+		})
+		if code != 2 || stdout.Len() != 0 {
+			t.Fatalf("%s exit %d stdout %q stderr %q", tt.name, code, stdout.String(), stderr.String())
+		}
+		if _, err := os.Stat(filepath.Join(root, "drafts")); !os.IsNotExist(err) {
+			t.Fatalf("%s created drafts: %v", tt.name, err)
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("program dir %#v err %v", entries, err)
+	}
+}
+
+func TestDraftRejectsDraftsFile(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "drafts"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jsonPath := filepath.Join(root, "missing.json")
+	template := filepath.Join(root, "missing.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, jsonPath, template)
+	if code != 1 || stdout != "" || stderr != "docs-cli: drafts is not a directory\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	info, err := os.Stat(filepath.Join(root, "drafts"))
+	if err != nil || info.IsDir() {
+		t.Fatalf("drafts %v err %v", info, err)
+	}
+}
+
+func TestDraftJSONTooLarge(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	path := writeFile(t, "over.json", bytes.Repeat([]byte{'x'}, maxJSONBytes+1))
+	template := filepath.Join(t.TempDir(), "template-not-opened.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, path, template)
+	if code != 1 || stdout != "" || stderr != errJSONTooLarge+"\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, template) {
+		t.Fatalf("stderr %q", stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func draftUsageCases() []struct {
+	name  string
+	args  []string
+	exact bool
+} {
+	return []struct {
+		name  string
+		args  []string
+		exact bool
+	}{
+		{name: "no flag", args: []string{"draft"}},
+		{name: "missing json", args: []string{"draft", "--json"}},
+		{name: "missing template", args: []string{"draft", "--template"}},
+		{name: "empty json", args: []string{"draft", "--json", "", "--template", "letter.pdf"}},
+		{name: "empty template", args: []string{"draft", "--json", "job.json", "--template", ""}},
+		{name: "json only", args: []string{"draft", "--json", "job.json"}},
+		{name: "template only", args: []string{"draft", "--template", "letter.pdf"}},
+		{name: "unknown flag", args: []string{"draft", "--bogus"}},
+		{name: "out flag", args: []string{"draft", "--out", "letter.txt"}},
+		{name: "extra arg", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "extra"}},
+		{name: "help", args: []string{"draft", "--help"}, exact: true},
+		{name: "short help", args: []string{"draft", "-h"}, exact: true},
+	}
+}
+
+func runDraftArgs(t *testing.T, root, jsonPath, templatePath string) (string, string, int) {
+	t.Helper()
+	SetDraftRootForTest(root)
+	t.Cleanup(restoreDraftRoot)
+	var stdout, stderr bytes.Buffer
+	d := deps{
+		Stdin:        strings.NewReader(""),
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+		Root:         t.TempDir(),
+		Environ:      []string{"APP_ENV=production"},
+		GeminiClient: blockGemini(t),
+	}
+	forbidEnv(t, &d)
+	code := run([]string{"draft", "--json", jsonPath, "--template", templatePath}, d)
+	return stdout.String(), stderr.String(), code
+}
+
+func rejectFM(t *testing.T) {
+	t.Helper()
+	jobad.SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
+		t.Errorf("fm called %q", argv)
+		return nil, []byte("fm called"), 1
+	})
+	t.Cleanup(restoreFMStub)
+}
+
+func assertDraftsEmpty(t *testing.T, root string) {
+	t.Helper()
+	drafts := filepath.Join(root, "drafts")
+	entries, err := os.ReadDir(drafts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("drafts has %d entries", len(entries))
+	}
+}
+
+func writeDraftEmailPDF(t *testing.T) string {
+	t.Helper()
+	body := draftTextPDF([]string{"ada@example.com"})
+	text := string(body)
+	if strings.Count(text, "Tj") != 1 || !strings.Contains(text, "(ada@example.com) Tj") {
+		t.Fatalf("pdf Tj operands = %q", text)
+	}
+	return writeFile(t, "ada.pdf", body)
+}
+
+func coverMinPath(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller")
+	}
+	path := filepath.Join(filepath.Dir(file), "..", "..", "internal", "jobad", "testdata", "cover_min.pdf")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func draftTextPDF(pages []string) []byte {
+	streams := make([]string, len(pages))
+	for i, text := range pages {
+		if text != "" {
+			streams[i] = "BT (" + text + ") Tj ET"
+		}
+	}
+	return draftRawPDF(streams)
+}
+
+func draftRawPDF(streams []string) []byte {
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.4\n")
+	offsets := []int{0}
+	writeObj := func(body string) {
+		offsets = append(offsets, b.Len())
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", len(offsets)-1, body)
+	}
+	nPages := len(streams)
+	kids := make([]string, nPages)
+	for i := 0; i < nPages; i++ {
+		kids[i] = fmt.Sprintf("%d 0 R", 3+2*i)
+	}
+	writeObj("<< /Type /Catalog /Pages 2 0 R >>")
+	writeObj(fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), nPages))
+	for i, stream := range streams {
+		contentNum := 4 + 2*i
+		writeObj(fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents %d 0 R >>", contentNum))
+		writeObj(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(stream), stream))
+	}
+	xrefAt := b.Len()
+	n := len(offsets)
+	fmt.Fprintf(&b, "xref\n0 %d\n", n)
+	fmt.Fprintf(&b, "0000000000 65535 f \n")
+	for i := 1; i < n; i++ {
+		fmt.Fprintf(&b, "%010d 00000 n \n", offsets[i])
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\n", n)
+	fmt.Fprintf(&b, "startxref\n%d\n%%%%EOF\n", xrefAt)
+	return b.Bytes()
 }
 
 func runAnalyzeArgs(t *testing.T, path string) (string, string, int) {
