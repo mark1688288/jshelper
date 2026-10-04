@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ledongthuc/pdf"
 )
 
 func TestCheckDraftRequirementsEmpty(t *testing.T) {
@@ -67,46 +69,236 @@ func TestDraftPromptShape(t *testing.T) {
 	}
 }
 
-func TestReflowTemplate(t *testing.T) {
+func TestLayoutGlyphs(t *testing.T) {
+	g := func(s string, x, y, w float64) pdf.Text {
+		return pdf.Text{S: s, X: x, Y: y, W: w, FontSize: 12}
+	}
 	cases := []struct {
 		name string
-		in   string
+		in   []pdf.Text
 		want string
 	}{
-		{"placeholders", "\n[Your\n \nname]\n \n[Email]\n", "[Your name] [Email]"},
-		{"prose then fragment", "Dear team\nada@example.com", "Dear team\nada@example.com"},
-		{"one fragment", "ada@example.com", "ada@example.com"},
-		{"name then email", "Ada Lovelace\nada@example.com", "Ada Lovelace\nada@example.com"},
-		{"blank between prose", "I write to apply.\n\nI have led teams.", "I write to apply.\n\nI have led teams."},
-		{"leading newline", "\nDRAFT-TEMPLATE-SENTINEL", "DRAFT-TEMPLATE-SENTINEL"},
-		{"crlf", "Dear team\r\nada@example.com", "Dear team\nada@example.com"},
-		{"bare cr", "I write to apply.\rI have led teams.", "I write to apply.\nI have led teams."},
-		{"prose without spacer", "I write to apply.\nI have led teams.", "I write to apply.\nI have led teams."},
-		{"several spacers", "I write to apply.\n\n\nI have led teams.", "I write to apply.\n\nI have led teams."},
-		{"prose spaces", "I  write   to apply.", "I write to apply."},
-		{"run then prose", "[Your\n \nname]\n\nDear hiring manager", "[Your name]\n\nDear hiring manager"},
+		{
+			name: "next word fits",
+			in: []pdf.Text{
+				g("edge", 0, 300, 100),
+				g("short", 0, 280, 40),
+				g("next", 0, 260, 30),
+			},
+			want: "edge\nshort\nnext",
+		},
+		{
+			name: "narrow gap joins",
+			in: []pdf.Text{
+				g("edge", 0, 300, 100),
+				g("short", 0, 280, 60),
+				g("next", 0, 260, 50),
+			},
+			want: "edge\nshort next",
+		},
+		{
+			name: "require gap joins",
+			in: []pdf.Text{
+				g("edge", 0, 300, 200),
+				g("require", 0, 280, 158),
+				g("additional", 0, 260, 47),
+			},
+			want: "edge\nrequire additional",
+		},
+		{
+			name: "task gap stays",
+			in: []pdf.Text{
+				g("edge", 0, 300, 100),
+				g("task].", 0, 280, 46),
+				g("I", 0, 260, 3),
+			},
+			want: "edge\ntask].\nI",
+		},
+		{
+			name: "blank lines are one paragraph break",
+			in: []pdf.Text{
+				g(" ", 0, 400, 4),
+				g("Dear", 0, 360, 40),
+				g(" ", 0, 340, 4),
+				g(" ", 0, 320, 4),
+				g("Body", 0, 280, 30),
+				g(" ", 0, 260, 4),
+			},
+			want: "Dear\n\nBody",
+		},
+		{
+			name: "trailing space trimmed",
+			in: []pdf.Text{
+				g("Hello", 0, 100, 40),
+				g(" ", 40, 100, 4),
+			},
+			want: "Hello",
+		},
+		{
+			name: "join trims the trailing space",
+			in: []pdf.Text{
+				g("edge", 0, 300, 100),
+				g("short", 0, 280, 60),
+				g(" ", 60, 280, 4),
+				g("next", 0, 260, 50),
+			},
+			want: "edge\nshort next",
+		},
+		{
+			name: "wide gap stays",
+			in: []pdf.Text{
+				g("edge", 0, 300, 200),
+				g("head", 0, 280, 100),
+				g("next", 0, 260, 150),
+			},
+			want: "edge\nhead\nnext",
+		},
+		{
+			name: "right edge does not swallow",
+			in: []pdf.Text{
+				g("edge", 0, 300, 100),
+				g("next", 0, 280, 20),
+			},
+			want: "edge\nnext",
+		},
+		{
+			name: "top to bottom then left to right",
+			in: []pdf.Text{
+				g("b", 10, 100, 5),
+				g("low", 0, 50, 10),
+				g("a", 0, 100, 5),
+			},
+			want: "ab\nlow",
+		},
+		{
+			name: "within one point is one line",
+			in: []pdf.Text{
+				g("b", 10, 99.5, 5),
+				g("a", 0, 100, 5),
+			},
+			want: "ab",
+		},
+		{
+			name: "one point is a new line",
+			in: []pdf.Text{
+				g("a", 0, 100, 20),
+				g("b", 0, 99, 10),
+			},
+			want: "a\nb",
+		},
+		{
+			name: "drop empty and newline glyphs",
+			in: []pdf.Text{
+				g("\n", 0, 100, 0),
+				{S: "", X: 5, Y: 100, W: 5, FontSize: 12},
+				g("b", 10, 100, 5),
+				g("a", 0, 100, 5),
+			},
+			want: "ab",
+		},
+		{
+			name: "x gap beats width",
+			in: []pdf.Text{
+				g("edge", 0, 200, 30),
+				{S: "A", X: 0, Y: 180, W: 100, FontSize: 12},
+				{S: "B", X: 8, Y: 180, W: 0, FontSize: 0},
+				g("next", 0, 160, 20),
+			},
+			want: "edge\nAB next",
+		},
+		{
+			name: "font size is the advance",
+			in: []pdf.Text{
+				g("edge", 0, 200, 30),
+				{S: "Z", X: 0, Y: 180, W: 0, FontSize: 12},
+				g("next", 0, 160, 20),
+			},
+			want: "edge\nZ next",
+		},
 	}
 	for _, c := range cases {
-		got := reflowTemplate(c.in)
+		got := layoutPage(c.in)
 		if got != c.want || strings.HasSuffix(got, "\n") {
 			t.Fatalf("%s =\n%q\nwant =\n%q", c.name, got, c.want)
 		}
 	}
 
-	doc := Document{
-		Header:       Header{TitleBlock: "System Analyst"},
-		Requirements: []string{"Know Go"},
+	got := layoutPages([][]pdf.Text{
+		{g("one", 0, 100, 20)},
+		nil,
+		{g(" ", 0, 100, 4)},
+		{g("two", 0, 80, 20)},
+	})
+	if got != "one\n\ntwo" || strings.HasSuffix(got, "\n") {
+		t.Fatalf("pages =\n%q", got)
 	}
-	got, err := DraftPrompt(doc, "\n[Your\n \nname]\n \n[Email]\nada@example.com")
-	if err != nil {
-		t.Fatal(err)
+}
+
+func TestLayoutLetter(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"trailing blank line", "hi\n\n", "hi\n\n"},
+		{"trim trailing spaces", "Dear team, \n\nI write. \n", "Dear team,\n\nI write.\n"},
+		{"drop placeholder line", "Yours sincerely, \n[Your name]\n", "Yours sincerely,\n"},
+		{"collapse blank lines", "a\n\n\nb", "a\n\nb"},
+		{"placeholder inside a sentence", "See [job board] today.\n", "See [job board] today.\n"},
+		{"empty brackets stay", "[]\n", "[]\n"},
+		{"placeholder between lines", "a\n[job board]\nb", "a\nb"},
+		{"trim a trailing tab", "Dear team,\t\nI write.", "Dear team,\nI write."},
+		{"crlf", "a\r\n\r\n\r\nb", "a\n\nb"},
+		{"keep a leading space", "  hi", "  hi"},
 	}
-	const wantTail = "Template:\n[Your name] [Email] ada@example.com\n"
-	if !strings.HasSuffix(got, wantTail) {
-		t.Fatalf("prompt =\n%s", got)
+	for _, c := range cases {
+		got, err := layoutLetter(c.in)
+		if err != nil || got != c.want {
+			t.Fatalf("%s = %q err %v\nwant %q", c.name, got, err, c.want)
+		}
 	}
-	if strings.Contains(got, "[Your\n") {
-		t.Fatalf("prompt kept a fragment break\n%s", got)
+	for _, in := range []string{"[Your name]", "[job board]\n", " \n\t", "[Your name]\n\n"} {
+		got, err := layoutLetter(in)
+		if got != "" || !errors.Is(err, ErrDraftSchema) || err.Error() != "docs-cli: fm output is not the draft schema" {
+			t.Fatalf("in %q got %q err %v", in, got, err)
+		}
+	}
+}
+
+func TestDraftAppliesLayout(t *testing.T) {
+	doc := Document{Requirements: []string{"Know Go"}}
+	calls := 0
+	SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+		calls++
+		if calls == 1 {
+			return []byte("ok"), nil, 0
+		}
+		return []byte("{\"letter\":\"Yours sincerely, \\n[Your name]\\n\"}\n"), nil, 0
+	})
+	t.Cleanup(restoreFMStub)
+
+	got, err := Draft(doc, "ada@example.com")
+	if err != nil || got != "Yours sincerely,\n" {
+		t.Fatalf("got %q err %v", got, err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d", calls)
+	}
+
+	calls = 0
+	SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+		calls++
+		if calls == 1 {
+			return []byte("ok"), nil, 0
+		}
+		return []byte(`{"letter":"[Your name]"}`), nil, 0
+	})
+	got, err = Draft(doc, "ada@example.com")
+	if got != "" || !errors.Is(err, ErrDraftSchema) || err.Error() != "docs-cli: fm output is not the draft schema" {
+		t.Fatalf("blank got %q err %v", got, err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d", calls)
 	}
 }
 
@@ -191,7 +383,7 @@ func TestExtractCoverMin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "DRAFT-TEMPLATE-SENTINEL") {
+	if got != "DRAFT-TEMPLATE-SENTINEL" {
 		t.Fatalf("text = %q", got)
 	}
 	if strings.Contains(got, "ada@example.com") {
@@ -348,7 +540,7 @@ func TestDraftAvailableThenRespond(t *testing.T) {
 	if LetterSchema != wantSchema || LetterSchema == AnalysisSchema {
 		t.Fatalf("schema = %q", LetterSchema)
 	}
-	const wantInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. The template's line breaks are PDF extraction artifacts, not the letter's layout. Do not copy them. Do not put each word on its own line, and do not write a line that is only a space. Write a normal cover letter: a salutation on one line, then body paragraphs of complete sentences, with several sentences in each paragraph and one blank line between paragraphs, then a closing on one line. Keep the template's language. Keep an applicant name or contact line only when the template gives that line as real text. When a real contact line is kept, put that line on its own line. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, and Requirements. Title is the role being applied for, not the applicant's current job. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, and do not use an employer from the template's previous role. When Company is (none), do not invent an employer and do not write (none) into the letter. Rewrite the body for this job's Duties and Requirements. Do not invent a recipient, job board, compliment, current job title, degree, date, or years of experience that appears in neither the template nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
+	const wantInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. The template's blank line is a paragraph break. Keep it. A single newline is a line break. Keep it. Do not join two blocks that the template separates with a blank line. Do not insert a blank line where the template has only a single newline. Do not put each word on its own line. Do not put a trailing space on any line. Do not write a line that is only a space. Keep the template's language. Keep an applicant name or contact line only when the template gives that line as real text. When a real contact line is kept, put that line on its own line. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, and Requirements. Title is the role being applied for, not the applicant's current job. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, and do not use an employer from the template's previous role. When Company is (none), do not invent an employer and do not write (none) into the letter. Rewrite the body for this job's Duties and Requirements. Do not invent a recipient, job board, compliment, current job title, degree, date, or years of experience that appears in neither the template nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
 	if DraftInstructions != wantInstructions || strings.Contains(DraftInstructions, "\n") {
 		t.Fatalf("instructions = %q", DraftInstructions)
 	}
