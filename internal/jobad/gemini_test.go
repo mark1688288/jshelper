@@ -878,6 +878,302 @@ func assertPhraseKept(t *testing.T, got, fallback Document) {
 	}
 }
 
+func TestAnalyzeGeminiFallback(t *testing.T) {
+	const key = "gemini-analysis-key"
+	const model = `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"Go","level":"must","applies_to":null}],"soft_skills":[]}`
+	doc := sampleAnalysisDoc()
+	doc.Header.Company = "COMPANY-TOKEN"
+	prompt, err := PromptText(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("available", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
+			calls++
+			return nil, []byte("not licensed\n"), 1
+		})
+		t.Cleanup(restoreFMStub)
+		client, cap := testGeminiClient(t, http.StatusOK, geminiTextEnvelope(t, model))
+		got, err := Analyze(doc, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 {
+			t.Fatalf("fm calls %d", calls)
+		}
+		if len(got.MustHave) != 1 || got.MustHave[0] != "Know Go" || got.MinYears != nil || got.Degree != nil {
+			t.Fatalf("analysis %#v", got)
+		}
+		if len(got.Tech) != 1 || got.Tech[0].Name != "Go" || got.Tech[0].Level != levelMust || got.Tech[0].AppliesTo != nil {
+			t.Fatalf("tech %#v", got.Tech)
+		}
+		assertAnalysisRequest(t, cap, key, prompt)
+	})
+
+	t.Run("respond", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
+			calls++
+			if calls == 1 {
+				return nil, nil, 0
+			}
+			return []byte(model), []byte("guardrail rejected\n"), 1
+		})
+		t.Cleanup(restoreFMStub)
+		client, cap := testGeminiClient(t, http.StatusOK, geminiTextEnvelope(t, model))
+		got, err := Analyze(doc, client)
+		if err != nil || len(got.MustHave) != 1 || got.MustHave[0] != "Know Go" {
+			t.Fatalf("got %#v err %v", got, err)
+		}
+		if calls != 2 {
+			t.Fatalf("fm calls %d", calls)
+		}
+		assertAnalysisRequest(t, cap, key, prompt)
+	})
+}
+
+func TestAnalyzeFMSuccessSkipsGemini(t *testing.T) {
+	cleanKeyring(t)
+	keyring.MockInitWithError(errors.New("do-not-read-gemini"))
+	t.Cleanup(func() { keyring.MockInit() })
+	hits := 0
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		hits++
+		return nil, errors.New("gemini called")
+	})}
+	model := []byte(`{"must_have":["FROM-FM"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[],"soft_skills":[]}`)
+	calls := 0
+	SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+		calls++
+		if calls == 1 {
+			return nil, nil, 0
+		}
+		return model, nil, 0
+	})
+	t.Cleanup(restoreFMStub)
+	got, err := Analyze(sampleAnalysisDoc(), client)
+	if err != nil || len(got.MustHave) != 1 || got.MustHave[0] != "FROM-FM" || hits != 0 || calls != 2 {
+		t.Fatalf("got %#v err %v hits %d calls %d", got, err, hits, calls)
+	}
+}
+
+func TestAnalyzeGeminiKeepsFMError(t *testing.T) {
+	const fmText = "docs-cli: fm: not licensed"
+	refuse := func(hits *int) *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			*hits++
+			return nil, errors.New("gemini called")
+		})}
+	}
+	failFM := func(t *testing.T) {
+		t.Helper()
+		SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+			return nil, []byte("not licensed\n"), 1
+		})
+		t.Cleanup(restoreFMStub)
+	}
+
+	t.Run("missing", func(t *testing.T) {
+		cleanKeyring(t)
+		hits := 0
+		failFM(t)
+		_, err := Analyze(sampleAnalysisDoc(), refuse(&hits))
+		if err == nil || err.Error() != fmText || hits != 0 {
+			t.Fatalf("err %v hits %d", err, hits)
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := keyring.Set(keyringService, geminiAccount, `{"api_key":""}`); err != nil {
+			t.Fatal(err)
+		}
+		hits := 0
+		failFM(t)
+		_, err := Analyze(sampleAnalysisDoc(), refuse(&hits))
+		if err == nil || err.Error() != fmText || hits != 0 || strings.Contains(err.Error(), "invalid") {
+			t.Fatalf("err %v hits %d", err, hits)
+		}
+	})
+
+	t.Run("unavailable", func(t *testing.T) {
+		const secret = "keyring-boom-secret"
+		keyring.MockInitWithError(errors.New(secret))
+		t.Cleanup(func() { keyring.MockInit() })
+		hits := 0
+		failFM(t)
+		_, err := Analyze(sampleAnalysisDoc(), refuse(&hits))
+		if err == nil || err.Error() != fmText || hits != 0 || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "keyring") {
+			t.Fatalf("err %v hits %d", err, hits)
+		}
+	})
+}
+
+func TestAnalyzeGeminiRejects(t *testing.T) {
+	const key = "gemini-analysis-key"
+	const model = `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"Go","level":"must","applies_to":null}],"soft_skills":[]}`
+	store := func(t *testing.T) {
+		t.Helper()
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+			return nil, []byte("not licensed\n"), 1
+		})
+		t.Cleanup(restoreFMStub)
+	}
+
+	t.Run("level", func(t *testing.T) {
+		store(t)
+		bad := strings.Replace(model, `"level":"must"`, `"level":"expert"`, 1)
+		client, _ := testGeminiClient(t, http.StatusOK, geminiTextEnvelope(t, bad))
+		_, err := Analyze(sampleAnalysisDoc(), client)
+		if err == nil || err.Error() != errGeminiAnalysisResponse.Error() || strings.Contains(err.Error(), "expert") || strings.Contains(err.Error(), "fm output") || strings.Contains(err.Error(), "not licensed") {
+			t.Fatalf("err %v", err)
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		store(t)
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, &netTimeout{msg: "dial tcp secret"}
+		})}
+		_, err := Analyze(sampleAnalysisDoc(), client)
+		if !errors.Is(err, errGeminiAnalysisTimeout) || strings.Contains(err.Error(), "dial") || strings.Contains(err.Error(), "not licensed") {
+			t.Fatalf("err %v", err)
+		}
+	})
+
+	t.Run("http", func(t *testing.T) {
+		store(t)
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("dial tcp secret")
+		})}
+		_, err := Analyze(sampleAnalysisDoc(), client)
+		if !errors.Is(err, errGeminiAnalysisHTTP) || strings.Contains(err.Error(), "dial") || strings.Contains(err.Error(), "not licensed") {
+			t.Fatalf("err %v", err)
+		}
+	})
+
+	t.Run("status", func(t *testing.T) {
+		store(t)
+		const detail = "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."
+		body := `{"error":{"status":"UNAVAILABLE","message":"` + detail + `","details":["hide-me ` + key + `"]}}`
+		client, _ := testGeminiClient(t, http.StatusServiceUnavailable, body)
+		_, err := Analyze(sampleAnalysisDoc(), client)
+		want := "docs-cli: gemini analysis rejected: status 503\n" +
+			"docs-cli: gemini analysis rejected: UNAVAILABLE: " + detail
+		if err == nil || err.Error() != want || strings.Contains(err.Error(), "hide-me") || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), "not licensed") || strings.Contains(err.Error(), "partition") || strings.Contains(err.Error(), "blocks") {
+			t.Fatalf("err %q", err)
+		}
+	})
+}
+
+func geminiTextEnvelope(t *testing.T, text string) string {
+	t.Helper()
+	outer := map[string]any{
+		"candidates": []any{
+			map[string]any{
+				"content": map[string]any{
+					"parts": []any{map[string]any{"text": text}},
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func assertAnalysisRequest(t *testing.T, cap *captured, key, prompt string) {
+	t.Helper()
+	u, err := url.Parse(cap.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.String() != geminiURL || u.RawQuery != "" || !strings.Contains(u.Path, geminiModel) {
+		t.Fatalf("url %s", cap.url)
+	}
+	if strings.Contains(cap.url, key) || strings.Contains(cap.body, key) {
+		t.Fatal("api key appeared in the url or body")
+	}
+	if cap.header.Get("x-goog-api-key") != key {
+		t.Fatalf("x-goog-api-key %q", cap.header.Get("x-goog-api-key"))
+	}
+	for _, banned := range []string{"COMPANY-TOKEN", "LOCATION-TOKEN", "WORKTYPE-TOKEN", "CLASS-TOKEN", "TRAILER-SENTINEL", "source-token", "person@example.com", AnalysisSchema} {
+		if strings.Contains(cap.body, banned) {
+			t.Fatalf("body contains %q\n%s", banned, cap.body)
+		}
+	}
+	var req struct {
+		SystemInstruction struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"systemInstruction"`
+		Contents []struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"contents"`
+		GenerationConfig struct {
+			Mime   string          `json:"response_mime_type"`
+			Schema json.RawMessage `json:"response_schema"`
+		} `json:"generationConfig"`
+	}
+	if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.SystemInstruction.Parts) != 1 || req.SystemInstruction.Parts[0].Text != AnalysisInstructions {
+		t.Fatalf("instructions %#v", req.SystemInstruction.Parts)
+	}
+	if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || req.Contents[0].Parts[0].Text != prompt {
+		t.Fatalf("prompt =\n%s", req.Contents)
+	}
+	if req.GenerationConfig.Mime != "application/json" {
+		t.Fatalf("mime %s", req.GenerationConfig.Mime)
+	}
+	schema := req.GenerationConfig.Schema
+	if bytes.Contains(schema, []byte(`"additionalProperties"`)) || !bytes.Contains(schema, []byte(`"enum":["must","advantage"]`)) {
+		t.Fatalf("schema %s", schema)
+	}
+	if strings.Count(string(schema), `"nullable":true`) != 3 {
+		t.Fatalf("nullable %s", schema)
+	}
+	var parsed struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"must_have", "advantage", "min_years", "degree", "languages", "tech", "soft_skills"}
+	if !slices.Equal(parsed.Required, want) {
+		t.Fatalf("required %#v", parsed.Required)
+	}
+	for _, name := range want {
+		if _, ok := parsed.Properties[name]; !ok {
+			t.Fatalf("schema missing %s", name)
+		}
+	}
+	if _, ok := parsed.Properties["company"]; ok {
+		t.Fatal("schema has company")
+	}
+}
+
 func join(items []string) string {
 	return strings.Join(items, "|")
 }

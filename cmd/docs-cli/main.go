@@ -103,8 +103,8 @@ type deps struct {
 	WriteCredentials    func(*config.Config) error
 	Authorize           func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error)
 	CreateDocument      func(ctx context.Context, title, body, folderID string, insertIndex int64) (string, error)
-	// GeminiClient is the HTTP client for section mapping.
-	// Nil uses the default client inside MapSections. Tests pass a client that does not call Gemini.
+	// GeminiClient is the HTTP client for section mapping and for analyze
+	// when fm fails. Nil uses the default client. Tests pass a client that does not call Gemini.
 	GeminiClient *http.Client
 }
 
@@ -629,7 +629,7 @@ func runAnalyze(args []string, d deps) int {
 		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 		return 1
 	}
-	analysis, err := jobad.Analyze(doc)
+	analysis, err := jobad.Analyze(doc, d.GeminiClient)
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1

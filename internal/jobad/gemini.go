@@ -42,7 +42,17 @@ var (
 	errGeminiHTTP         = errors.New("docs-cli: gemini mapping rejected: http")
 	errGeminiResponse     = errors.New("docs-cli: gemini mapping rejected: response")
 	errGeminiBlocks       = errors.New("docs-cli: gemini mapping rejected: blocks")
+
+	errGeminiAnalysisTimeout  = errors.New("docs-cli: gemini analysis rejected: timeout")
+	errGeminiAnalysisHTTP     = errors.New("docs-cli: gemini analysis rejected: http")
+	errGeminiAnalysisResponse = errors.New("docs-cli: gemini analysis rejected: response")
 )
+
+// analysisGeminiSchema is the Gemini response schema for Analysis.
+// It is not the fm --schema dialect. Gemini rejects additionalProperties,
+// so that field is omitted. ParseAnalysis still rejects unknown fields
+// and a tech.level other than must or advantage.
+const analysisGeminiSchema = `{"type":"OBJECT","properties":{"must_have":{"type":"ARRAY","items":{"type":"STRING"}},"advantage":{"type":"ARRAY","items":{"type":"STRING"}},"min_years":{"type":"INTEGER","nullable":true},"degree":{"type":"STRING","nullable":true},"languages":{"type":"ARRAY","items":{"type":"STRING"}},"tech":{"type":"ARRAY","items":{"type":"OBJECT","properties":{"name":{"type":"STRING"},"level":{"type":"STRING","enum":["must","advantage"]},"applies_to":{"type":"STRING","nullable":true}},"required":["name","level","applies_to"]}},"soft_skills":{"type":"ARRAY","items":{"type":"STRING"}}},"required":["must_have","advantage","min_years","degree","languages","tech","soft_skills"]}`
 
 // rejectError is a stderr line that may wrap a cause without including the cause text.
 type rejectError struct {
@@ -123,7 +133,8 @@ func LoadGeminiKey() (string, error) {
 
 // CollectBlocks lists li items and non-heading paragraphs in the same scope
 // as Parse. A jobAdDetails page collects only that element. Otherwise it
-// collects the JSON-LD description, or the body paragraphs outside nav,
+// collects the JSON-LD description, the Taleo initialHistory job HTML when
+// the visible page has no requirements, or the body paragraphs outside nav,
 // header, footer, and role=navigation. Emails are removed. Header fields
 // are not collected. A page Parse rejects returns the blocks stderr line.
 func CollectBlocks(page []byte) ([]Block, error) {
@@ -134,13 +145,56 @@ func CollectBlocks(page []byte) ([]Block, error) {
 	if _, err := parseRoot(root); err != nil {
 		return nil, blockReject(err)
 	}
-	scope, ok := locate(root)
-	if !ok || scope.node == nil {
+	scope, err := scopeFor(root)
+	if err != nil || scope.node == nil {
 		return []Block{}, nil
 	}
 	var blocks []Block
+	if scope.taleo {
+		walkBlocksTaleo(scope.node, "", &blocks)
+		return blocks, nil
+	}
 	walkBlocks(scope.node, "", &blocks, scope.skipChrome)
 	return blocks, nil
+}
+
+func walkBlocksTaleo(n *html.Node, heading string, blocks *[]Block) string {
+	if n.Type == html.ElementNode {
+		switch n.Data {
+		case "script", "style", "svg":
+			return heading
+		case "li":
+			appendBlock(blocks, heading, textOf(n))
+			return heading
+		case "p":
+			return walkBlockTaleoP(n, heading, blocks)
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		heading = walkBlocksTaleo(c, heading, blocks)
+	}
+	return heading
+}
+
+func walkBlockTaleoP(n *html.Node, heading string, blocks *[]Block) string {
+	raw := textOf(n)
+	norm := normalizeHeading(raw)
+	if utf8.RuneCountInString(norm) <= maxHeadingRunes {
+		if _, ok := classify(norm); ok {
+			return raw
+		}
+		if taleoRequirementHeading(norm) {
+			return raw
+		}
+	}
+	if _, ok := taleoGapLabel(n, norm); ok {
+		if taleoLabelHasBody(raw) {
+			appendBlock(blocks, heading, raw)
+		}
+		return raw
+	}
+	appendBlock(blocks, heading, raw)
+	return heading
 }
 
 func walkBlocks(n *html.Node, heading string, blocks *[]Block, skipChrome bool) string {
@@ -238,27 +292,9 @@ func requestMapping(ctx context.Context, client *http.Client, key string, blocks
 	if err != nil {
 		return sectionMapping{}, errGeminiResponse
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, geminiURL, bytes.NewReader(payload))
+	body, err := postGemini(ctx, client, key, payload, false)
 	if err != nil {
-		return sectionMapping{}, errGeminiResponse
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-goog-api-key", key)
-	resp, err := client.Do(req)
-	if err != nil {
-		return sectionMapping{}, geminiTransportError(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxGeminiErrorBody))
-		if readErr != nil {
-			errBody = nil
-		}
-		return sectionMapping{}, geminiStatusError(resp.StatusCode, errBody, key)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGeminiResponse+1))
-	if err != nil || len(body) > maxGeminiResponse {
-		return sectionMapping{}, errGeminiResponse
+		return sectionMapping{}, err
 	}
 	mapped, err := parseMapping(body)
 	if err != nil {
@@ -267,19 +303,100 @@ func requestMapping(ctx context.Context, client *http.Client, key string, blocks
 	return mapped, nil
 }
 
-func geminiTransportError(err error) error {
-	if errors.Is(err, context.DeadlineExceeded) {
+// requestAnalysis asks Gemini once for an Analysis object.
+// The key is sent only in the x-goog-api-key header.
+// prompt is PromptText. The instruction bytes are AnalysisInstructions.
+// A transport failure or a body that is not Analysis returns an analysis
+// rejection. The text does not include the HTTP body, the transport error,
+// or the API key. There is no partition reason and no blocks reason.
+func requestAnalysis(ctx context.Context, client *http.Client, key, prompt string) (Analysis, error) {
+	if client == nil {
+		client = &http.Client{Timeout: geminiTimeout}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, geminiTimeout)
+	defer cancel()
+	payload, err := analysisRequestBody(prompt)
+	if err != nil {
+		return Analysis{}, errGeminiAnalysisResponse
+	}
+	raw, err := postGemini(ctx, client, key, payload, true)
+	if err != nil {
+		return Analysis{}, err
+	}
+	text, err := geminiCandidateText(raw)
+	if err != nil {
+		return Analysis{}, errGeminiAnalysisResponse
+	}
+	parsed, err := ParseAnalysis([]byte(text))
+	if err != nil {
+		return Analysis{}, errGeminiAnalysisResponse
+	}
+	return parsed, nil
+}
+
+func postGemini(ctx context.Context, client *http.Client, key string, payload []byte, analysis bool) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, geminiURL, bytes.NewReader(payload))
+	if err != nil {
+		return nil, geminiResponseError(analysis)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", key)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, geminiTransportError(err, analysis)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxGeminiErrorBody))
+		if readErr != nil {
+			errBody = nil
+		}
+		return nil, geminiStatusError(resp.StatusCode, errBody, key, analysis)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGeminiResponse+1))
+	if err != nil || len(body) > maxGeminiResponse {
+		return nil, geminiResponseError(analysis)
+	}
+	return body, nil
+}
+
+func geminiResponseError(analysis bool) error {
+	if analysis {
+		return errGeminiAnalysisResponse
+	}
+	return errGeminiResponse
+}
+
+func geminiTransportError(err error, analysis bool) error {
+	if geminiTimedOut(err) {
+		if analysis {
+			return errGeminiAnalysisTimeout
+		}
 		return errGeminiTimeout
 	}
-	var timeout net.Error
-	if errors.As(err, &timeout) && timeout.Timeout() {
-		return errGeminiTimeout
+	if analysis {
+		return errGeminiAnalysisHTTP
 	}
 	return errGeminiHTTP
 }
 
-func geminiStatusError(code int, body []byte, key string) error {
-	first := "docs-cli: gemini mapping rejected: status " + strconv.Itoa(code)
+func geminiTimedOut(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout net.Error
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
+func geminiStatusError(code int, body []byte, key string, analysis bool) error {
+	prefix := "docs-cli: gemini mapping rejected: "
+	if analysis {
+		prefix = "docs-cli: gemini analysis rejected: "
+	}
+	first := prefix + "status " + strconv.Itoa(code)
 	suffix, ok := geminiErrorSuffix(body)
 	if !ok {
 		return errors.New(first)
@@ -290,7 +407,7 @@ func geminiStatusError(code int, body []byte, key string) error {
 	if utf8.RuneCountInString(suffix) > maxStatusDetailRunes {
 		suffix = string([]rune(suffix)[:maxStatusDetailRunes])
 	}
-	second := "docs-cli: gemini mapping rejected: " + suffix
+	second := prefix + suffix
 	if key != "" && strings.Contains(second, key) {
 		return errors.New(first)
 	}
@@ -338,6 +455,25 @@ func rawJSONString(raw json.RawMessage) (string, bool) {
 	return s, true
 }
 
+func analysisRequestBody(prompt string) ([]byte, error) {
+	body := map[string]any{
+		"systemInstruction": map[string]any{
+			"parts": []any{map[string]any{"text": AnalysisInstructions}},
+		},
+		"contents": []any{
+			map[string]any{
+				"role":  "user",
+				"parts": []any{map[string]any{"text": prompt}},
+			},
+		},
+		"generationConfig": map[string]any{
+			"response_mime_type": "application/json",
+			"response_schema":    json.RawMessage(analysisGeminiSchema),
+		},
+	}
+	return json.Marshal(body)
+}
+
 func geminiRequestBody(prompt string) ([]byte, error) {
 	schema := json.RawMessage(`{
 		"type": "OBJECT",
@@ -381,23 +517,11 @@ func mappingPrompt(blocks []Block) string {
 }
 
 func parseMapping(raw []byte) (sectionMapping, error) {
-	var env struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
+	text, err := geminiCandidateText(raw)
+	if err != nil {
+		return sectionMapping{}, err
 	}
-	if err := json.Unmarshal(raw, &env); err != nil || len(env.Candidates) == 0 {
-		return sectionMapping{}, errGeminiResponse
-	}
-	var text strings.Builder
-	for _, part := range env.Candidates[0].Content.Parts {
-		text.WriteString(part.Text)
-	}
-	dec := json.NewDecoder(strings.NewReader(text.String()))
+	dec := json.NewDecoder(strings.NewReader(text))
 	dec.DisallowUnknownFields()
 	var mapped sectionMapping
 	if err := dec.Decode(&mapped); err != nil {
@@ -408,6 +532,26 @@ func parseMapping(raw []byte) (sectionMapping, error) {
 		return sectionMapping{}, errGeminiResponse
 	}
 	return mapped, nil
+}
+
+func geminiCandidateText(raw []byte) (string, error) {
+	var env struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || len(env.Candidates) == 0 {
+		return "", errGeminiResponse
+	}
+	var text strings.Builder
+	for _, part := range env.Candidates[0].Content.Parts {
+		text.WriteString(part.Text)
+	}
+	return text.String(), nil
 }
 
 func partitionOK(blocks []Block, mapped sectionMapping) bool {

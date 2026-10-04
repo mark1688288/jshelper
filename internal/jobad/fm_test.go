@@ -25,7 +25,7 @@ func TestAnalyzeRunsAvailableThenRespond(t *testing.T) {
 	})
 	t.Cleanup(restoreFMStub)
 
-	got, err := Analyze(doc)
+	got, err := Analyze(doc, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +60,7 @@ func TestAnalyzeRunsAvailableThenRespond(t *testing.T) {
 }
 
 func TestAnalyzeSkipsRespondWhenAvailableFails(t *testing.T) {
+	cleanKeyring(t)
 	var calls [][]string
 	SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
 		calls = append(calls, append([]string(nil), argv...))
@@ -67,7 +68,7 @@ func TestAnalyzeSkipsRespondWhenAvailableFails(t *testing.T) {
 	})
 	t.Cleanup(restoreFMStub)
 
-	got, err := Analyze(sampleAnalysisDoc())
+	got, err := Analyze(sampleAnalysisDoc(), nil)
 	if err == nil || err.Error() != "docs-cli: fm: not licensed" {
 		t.Fatalf("got %#v err %v", got, err)
 	}
@@ -77,6 +78,7 @@ func TestAnalyzeSkipsRespondWhenAvailableFails(t *testing.T) {
 }
 
 func TestAnalyzeRespondFailure(t *testing.T) {
+	cleanKeyring(t)
 	var calls int
 	SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
 		calls++
@@ -87,7 +89,7 @@ func TestAnalyzeRespondFailure(t *testing.T) {
 	})
 	t.Cleanup(restoreFMStub)
 
-	_, err := Analyze(sampleAnalysisDoc())
+	_, err := Analyze(sampleAnalysisDoc(), nil)
 	if err == nil || err.Error() != "docs-cli: fm: line1\nguardrail rejected" {
 		t.Fatalf("err %v", err)
 	}
@@ -110,7 +112,7 @@ func TestAnalyzeEmptyRequirementsDoesNotExec(t *testing.T) {
 		{Requirements: []string{"person@example.com"}, Trailer: []string{"TRAILER-SENTINEL"}},
 	}
 	for _, doc := range docs {
-		got, err := Analyze(doc)
+		got, err := Analyze(doc, nil)
 		if got.MustHave != nil || !errors.Is(err, ErrRequirementsEmpty) {
 			t.Fatalf("doc %#v got %#v err %v", doc.Requirements, got, err)
 		}
@@ -131,7 +133,7 @@ func TestAnalyzeRejectsFMProse(t *testing.T) {
 	})
 	t.Cleanup(restoreFMStub)
 
-	got, err := Analyze(sampleAnalysisDoc())
+	got, err := Analyze(sampleAnalysisDoc(), nil)
 	if !errors.Is(err, ErrAnalysisSchema) || got.MustHave != nil {
 		t.Fatalf("got %#v err %v", got, err)
 	}
@@ -141,7 +143,8 @@ func TestAnalyzeRejectsFMProse(t *testing.T) {
 }
 
 func TestAnalyzeDefaultStubDoesNotRunFM(t *testing.T) {
-	_, err := Analyze(sampleAnalysisDoc())
+	cleanKeyring(t)
+	_, err := Analyze(sampleAnalysisDoc(), nil)
 	if err == nil || err.Error() != "docs-cli: fm: fm exec not stubbed" {
 		t.Fatal(err)
 	}

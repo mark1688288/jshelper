@@ -1706,6 +1706,62 @@ func TestParseOtherSource(t *testing.T) {
 	})
 }
 
+func TestParseTaleoHistory(t *testing.T) {
+	const apiKey = "taleo-history-gemini-key"
+	page := []byte(`<title>Careers at Hospital Authority</title>
+<nav><p>CHROME-NOTICE</p></nav>
+<input type="hidden" name="initialHistory" value="ftlx0!|!100%!|!!*!<p><strong>Post:</strong> Supplies Supervisor II</p><p><strong>Key Responsibilities\:</strong></p><p>Buy supplies</p><p><strong>Entry Requirements:</strong></p><p>Know stores</p><p><strong>OR</strong></p><p>Second path</p><p><strong>Preferable attributes:</strong></p><p>Excel helps</p>">`)
+	path := writeFile(t, "taleo.html", page)
+	phrase := phraseJSON(t, page, path)
+
+	t.Run("no key keeps taleo phrase json", func(t *testing.T) {
+		keyring.MockInit()
+		stdout, stderr, code := runParseArgs(t, []string{"parse", "--html", path}, nil)
+		if code != 0 || stdout != phrase || stderr != errGeminiKeyMissing+"\n" {
+			t.Fatalf("exit %d stdout %s stderr %q", code, stdout, stderr)
+		}
+		if strings.Contains(stdout, "CHROME-NOTICE") || strings.Contains(stdout, "Careers at Hospital Authority") || !strings.Contains(stdout, "Know stores") {
+			t.Fatalf("stdout %s", stdout)
+		}
+	})
+
+	t.Run("gemini partitions taleo blocks", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		reply := geminiReply(t, nil, []string{"Buy supplies"}, []string{"Know stores", "OR", "Second path"}, []string{"Post: Supplies Supervisor II", "Excel helps"})
+		cap := &geminiCapture{}
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"parse", "--html", path}, deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			GeminiClient: mappingClient(t, http.StatusOK, reply, cap),
+		})
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("exit %d stderr %q stdout %s", code, stderr.String(), stdout.String())
+		}
+		var got jobad.Document
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Source != path || got.Header.TitleBlock != "Supplies Supervisor II" {
+			t.Fatalf("header %+v source %q", got.Header, got.Source)
+		}
+		if strings.Join(got.Duties, "|") != "Buy supplies" || strings.Join(got.Requirements, "|") != "Know stores|OR|Second path" || strings.Join(got.Trailer, "|") != "Post: Supplies Supervisor II|Excel helps" {
+			t.Fatalf("lists %+v", got)
+		}
+		if strings.Contains(cap.body, "CHROME-NOTICE") || strings.Contains(cap.body, apiKey) || strings.Contains(cap.body, "initialHistory") || strings.Contains(cap.body, "<p>") || strings.Contains(cap.url, apiKey) {
+			t.Fatalf("request url %s body %s", cap.url, cap.body)
+		}
+		if !strings.Contains(cap.body, "Buy supplies") || !strings.Contains(cap.body, "Know stores") || !strings.Contains(cap.body, "Excel helps") {
+			t.Fatalf("body %s", cap.body)
+		}
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+	})
+}
+
 func runParseArgs(t *testing.T, args []string, tty config.TTY) (string, string, int) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
@@ -1832,6 +1888,10 @@ func TestAnalyzeCommandFakeFM(t *testing.T) {
 }
 
 func TestAnalyzeSkipsFMWhenRequirementsEmpty(t *testing.T) {
+	keyring.MockInit()
+	if err := jobad.StoreGeminiKey("analyze-gemini-key"); err != nil {
+		t.Fatal(err)
+	}
 	calls := 0
 	jobad.SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
 		calls++
@@ -1857,6 +1917,7 @@ func TestAnalyzeSkipsFMWhenRequirementsEmpty(t *testing.T) {
 }
 
 func TestAnalyzeFMAvailableFails(t *testing.T) {
+	keyring.MockInit()
 	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 
 	t.Run("available", func(t *testing.T) {
@@ -1888,6 +1949,10 @@ func TestAnalyzeFMAvailableFails(t *testing.T) {
 }
 
 func TestAnalyzeRejectsModelProse(t *testing.T) {
+	keyring.MockInit()
+	if err := jobad.StoreGeminiKey("analyze-gemini-key"); err != nil {
+		t.Fatal(err)
+	}
 	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 	var calls [][]string
 	scriptedFM(t, &calls,
@@ -1899,6 +1964,184 @@ func TestAnalyzeRejectsModelProse(t *testing.T) {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
 	if len(calls) != 2 || calls[1][1] != "respond" {
+		t.Fatalf("calls %#v", calls)
+	}
+}
+
+func TestAnalyzeUsesGeminiWhenFMFails(t *testing.T) {
+	const apiKey = "analyze-gemini-key"
+	const company = "COMPANY-TOKEN"
+	model := `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"R&D","level":"must","applies_to":"For Frontend"}],"soft_skills":[]}`
+	const want = `{
+  "must_have": [
+    "Know Go"
+  ],
+  "advantage": [],
+  "min_years": null,
+  "degree": null,
+  "languages": [],
+  "tech": [
+    {
+      "name": "R&D",
+      "level": "must",
+      "applies_to": "For Frontend"
+    }
+  ],
+  "soft_skills": []
+}
+`
+	doc := jobad.Document{
+		Source: "source-token-9f3a.html",
+		Header: jobad.Header{
+			TitleBlock:     "System Analyst",
+			Company:        company,
+			Location:       "LOCATION-TOKEN",
+			WorkType:       "WORKTYPE-TOKEN",
+			Classification: "CLASS-TOKEN",
+		},
+		Benefits:     []string{"Medical person@example.com"},
+		Requirements: []string{"Know Go"},
+		Trailer:      []string{"TRAILER-SENTINEL"},
+	}
+
+	runCase := func(t *testing.T, steps ...fmStep) {
+		t.Helper()
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		path := writeJobJSON(t, doc)
+		var calls [][]string
+		scriptedFM(t, &calls, steps...)
+		hits := 0
+		cap := &geminiCapture{}
+		tty := &fakeTTY{terminal: true, secrets: []string{apiKey}}
+		var stdout, stderr bytes.Buffer
+		d := deps{
+			Stdin:        strings.NewReader(apiKey + "\n"),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			Root:         t.TempDir(),
+			Environ:      []string{"APP_ENV=production"},
+			TTY:          tty,
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, model), &hits, cap),
+		}
+		forbidEnv(t, &d)
+		code := run([]string{"analyze", "--json", path}, d)
+		if code != 0 || stderr.Len() != 0 || stdout.String() != want {
+			t.Fatalf("exit %d stderr %q stdout\n%s", code, stderr.String(), stdout.String())
+		}
+		if hits != 1 {
+			t.Fatalf("gemini hits %d", hits)
+		}
+		if len(tty.prompts) != 0 {
+			t.Fatalf("prompted %q", tty.prompts)
+		}
+		for _, banned := range []string{apiKey, company, "LOCATION-TOKEN", "WORKTYPE-TOKEN", "CLASS-TOKEN", "TRAILER-SENTINEL", "source-token-9f3a.html", "person@example.com"} {
+			if strings.Contains(cap.body, banned) || strings.Contains(cap.url, banned) {
+				t.Fatalf("request contains %q\n%s", banned, cap.body)
+			}
+		}
+		if cap.header.Get("x-goog-api-key") != apiKey {
+			t.Fatalf("header %q", cap.header.Get("x-goog-api-key"))
+		}
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+		assertRefreshUntouched(t)
+		if len(calls) != len(steps) {
+			t.Fatalf("fm calls %#v", calls)
+		}
+	}
+
+	t.Run("available", func(t *testing.T) {
+		runCase(t, fmStep{stderr: "not licensed\n", code: 1})
+	})
+	t.Run("respond", func(t *testing.T) {
+		runCase(t, fmStep{}, fmStep{stderr: "guardrail rejected\n", code: 1})
+	})
+}
+
+func TestAnalyzeFMSuccessSkipsGemini(t *testing.T) {
+	keyring.MockInit()
+	const apiKey = "analyze-gemini-key"
+	if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobad.StoreGeminiKey(apiKey); err != nil {
+		t.Fatal(err)
+	}
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	fmModel := `{"must_have":["FROM-FM"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[],"soft_skills":[]}`
+	geminiModel := `{"must_have":["FROM-GEMINI"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[],"soft_skills":[]}`
+	var calls [][]string
+	scriptedFM(t, &calls, fmStep{}, fmStep{stdout: fmModel + "\n"})
+	hits := 0
+	stdout, stderr, code := runAnalyzeClient(t, path, countingGemini(t, http.StatusOK, analysisEnvelope(t, geminiModel), &hits, &geminiCapture{}))
+	if code != 0 || stderr != "" || hits != 0 || !strings.Contains(stdout, "FROM-FM") || strings.Contains(stdout, "FROM-GEMINI") {
+		t.Fatalf("exit %d hits %d stdout %s stderr %q", code, hits, stdout, stderr)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls %#v", calls)
+	}
+	assertRefreshUntouched(t)
+}
+
+func TestAnalyzeGeminiRejectsBadLevel(t *testing.T) {
+	keyring.MockInit()
+	const apiKey = "analyze-gemini-key"
+	if err := jobad.StoreGeminiKey(apiKey); err != nil {
+		t.Fatal(err)
+	}
+	path := writeJobJSON(t, jobad.Document{
+		Header:       jobad.Header{Company: "COMPANY-TOKEN"},
+		Requirements: []string{"Know Go"},
+	})
+	var calls [][]string
+	scriptedFM(t, &calls, fmStep{stderr: "not licensed\n", code: 1})
+	bad := `{"must_have":[],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"Go","level":"expert","applies_to":null}],"soft_skills":[]}`
+	stdout, stderr, code := runAnalyzeClient(t, path, mappingClient(t, http.StatusOK, analysisEnvelope(t, bad), &geminiCapture{}))
+	if code != 1 || stdout != "" || stderr != "docs-cli: gemini analysis rejected: response\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, "docs-cli: fm:") || strings.Contains(stderr, apiKey) || strings.Contains(stderr, "expert") || strings.Contains(stderr, "COMPANY-TOKEN") {
+		t.Fatalf("stderr %q", stderr)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls %#v", calls)
+	}
+}
+
+func TestAnalyzeNoKeyDoesNotCallGemini(t *testing.T) {
+	keyring.MockInit()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	var calls [][]string
+	scriptedFM(t, &calls, fmStep{stderr: "not licensed\n", code: 1})
+	hits := 0
+	tty := &fakeTTY{terminal: true, secrets: []string{"should-not-ask"}}
+	var stdout, stderr bytes.Buffer
+	d := deps{
+		Stdin:        strings.NewReader("should-not-ask\n"),
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+		Root:         t.TempDir(),
+		Environ:      []string{"APP_ENV=production"},
+		TTY:          tty,
+		GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[],"soft_skills":[]}`), &hits, &geminiCapture{}),
+	}
+	forbidEnv(t, &d)
+	code := run([]string{"analyze", "--json", path}, d)
+	if code != 1 || stdout.Len() != 0 || stderr.String() != "docs-cli: fm: not licensed\n" || hits != 0 {
+		t.Fatalf("exit %d hits %d stdout %q stderr %q", code, hits, stdout.String(), stderr.String())
+	}
+	if len(tty.prompts) != 0 {
+		t.Fatalf("prompted %q", tty.prompts)
+	}
+	if _, err := keyring.Get("docs-cli", "gemini-api-key"); !errors.Is(err, keyring.ErrNotFound) {
+		t.Fatalf("key stored, err %v", err)
+	}
+	if len(calls) != 1 {
 		t.Fatalf("calls %#v", calls)
 	}
 }
@@ -2597,6 +2840,11 @@ func draftRawPDF(streams []string) []byte {
 
 func runAnalyzeArgs(t *testing.T, path string) (string, string, int) {
 	t.Helper()
+	return runAnalyzeClient(t, path, blockGemini(t))
+}
+
+func runAnalyzeClient(t *testing.T, path string, client *http.Client) (string, string, int) {
+	t.Helper()
 	var stdout, stderr bytes.Buffer
 	d := deps{
 		Stdin:        strings.NewReader(""),
@@ -2604,11 +2852,37 @@ func runAnalyzeArgs(t *testing.T, path string) (string, string, int) {
 		Stderr:       &stderr,
 		Root:         t.TempDir(),
 		Environ:      []string{"APP_ENV=production"},
-		GeminiClient: blockGemini(t),
+		GeminiClient: client,
 	}
 	forbidEnv(t, &d)
 	code := run([]string{"analyze", "--json", path}, d)
 	return stdout.String(), stderr.String(), code
+}
+
+func countingGemini(t *testing.T, status int, response string, hits *int, cap *geminiCapture) *http.Client {
+	t.Helper()
+	inner := mappingClient(t, status, response, cap)
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		*hits++
+		return inner.Transport.RoundTrip(r)
+	})}
+}
+
+func analysisEnvelope(t *testing.T, object string) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"candidates": []any{
+			map[string]any{
+				"content": map[string]any{
+					"parts": []any{map[string]any{"text": object}},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 type fmStep struct {

@@ -3,6 +3,7 @@ package jobad
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -237,6 +238,38 @@ func TestAnalysisRejectsBadLevel(t *testing.T) {
 		if err == nil || !errors.Is(err, ErrAnalysisSchema) || err.Error() != "docs-cli: fm output is not the analysis schema" {
 			t.Fatalf("stdout %s\ngot %#v err %v", stdout, got, err)
 		}
+	}
+}
+
+func TestAnalyzeEmptyRequirementsSkipsGemini(t *testing.T) {
+	cleanKeyring(t)
+	if err := StoreGeminiKey("gemini-analysis-key"); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+		calls++
+		return nil, []byte("fm called"), 1
+	})
+	t.Cleanup(restoreFMStub)
+	hits := 0
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		hits++
+		return nil, errors.New("gemini called")
+	})}
+	docs := []Document{
+		{},
+		{Requirements: []string{}},
+		{Requirements: []string{"person@example.com"}, Header: Header{Company: "COMPANY-TOKEN"}},
+	}
+	for _, doc := range docs {
+		got, err := Analyze(doc, client)
+		if got.MustHave != nil || !errors.Is(err, ErrRequirementsEmpty) {
+			t.Fatalf("doc %#v got %#v err %v", doc.Requirements, got, err)
+		}
+	}
+	if calls != 0 || hits != 0 {
+		t.Fatalf("calls %d hits %d", calls, hits)
 	}
 }
 

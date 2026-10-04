@@ -4,6 +4,7 @@ package jobad
 import (
 	"encoding/json"
 	"errors"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -71,7 +72,9 @@ func (d *Document) UnmarshalJSON(data []byte) error {
 
 // Parse builds a Document from a saved job HTML page.
 // A page with jobAdDetails uses that element and ignores JSON-LD.
-// Lists are empty slices, never nil. Source is left empty.
+// When that page has no requirements, a Taleo initialHistory value that
+// holds the job HTML is parsed instead. Lists are empty slices, never nil.
+// Source is left empty.
 func Parse(page []byte) (Document, error) {
 	root, err := html.Parse(strings.NewReader(string(page)))
 	if err != nil {
@@ -90,22 +93,11 @@ func emptyDocument() Document {
 }
 
 func parseRoot(root *html.Node) (Document, error) {
-	doc := emptyDocument()
-	scope, ok := locate(root)
-	if !ok {
-		return Document{}, ErrJobAdDetailsNotFound
+	scope, err := scopeFor(root)
+	if err != nil {
+		return Document{}, err
 	}
-	doc.Header = scope.header
-	redactHeader(&doc.Header)
-	if scope.node != nil {
-		// Body text before a recognized heading is trailer. Chrome subtrees
-		// are already skipped, so the remaining paragraphs are the ad.
-		section := ""
-		if scope.body {
-			section = sectionGap
-		}
-		walk(scope.node, section, &doc, scope.skipChrome)
-	}
+	doc := documentFrom(scope)
 	if scope.jobsdb {
 		return doc, nil
 	}
@@ -113,6 +105,54 @@ func parseRoot(root *html.Node) (Document, error) {
 		return Document{}, ErrJobAdDetailsNotFound
 	}
 	return doc, nil
+}
+
+func documentFrom(scope contentScope) Document {
+	doc := emptyDocument()
+	doc.Header = scope.header
+	redactHeader(&doc.Header)
+	if scope.node == nil {
+		return doc
+	}
+	// Body text before a recognized heading is trailer. Chrome subtrees
+	// are already skipped, so the remaining paragraphs are the ad.
+	section := ""
+	if scope.body {
+		section = sectionGap
+	}
+	if scope.taleo {
+		walkTaleo(scope.node, section, &doc)
+		return doc
+	}
+	walk(scope.node, section, &doc, scope.skipChrome)
+	return doc
+}
+
+// scopeFor picks the node Parse and CollectBlocks walk.
+// A JobsDB page stays on jobAdDetails. Another page keeps its first pass
+// when that pass already has requirements. Otherwise a Taleo initialHistory
+// job HTML replaces the visible page.
+func scopeFor(root *html.Node) (contentScope, error) {
+	scope, ok := locate(root)
+	if !ok {
+		return contentScope{}, ErrJobAdDetailsNotFound
+	}
+	if scope.jobsdb {
+		return scope, nil
+	}
+	if len(documentFrom(scope).Requirements) > 0 {
+		return scope, nil
+	}
+	frag := taleoFragment(root)
+	if frag == nil {
+		return scope, nil
+	}
+	taleo := contentScope{node: frag, header: scope.header, body: true, taleo: true}
+	alt := documentFrom(taleo)
+	if headerFilled(alt.Header) || !sectionsEmpty(alt) {
+		return taleo, nil
+	}
+	return scope, nil
 }
 
 func redactHeader(h *Header) {
@@ -125,6 +165,7 @@ func redactHeader(h *Header) {
 
 // contentScope is the node Parse and CollectBlocks walk.
 // jobsdb ignores JSON-LD. body walks p and li outside chrome.
+// taleo walks the job HTML from input name=initialHistory.
 // A JSON-LD posting may have a nil node when description has no fragment.
 type contentScope struct {
 	node       *html.Node
@@ -132,6 +173,7 @@ type contentScope struct {
 	jobsdb     bool
 	body       bool
 	skipChrome bool
+	taleo      bool
 }
 
 func locate(root *html.Node) (contentScope, bool) {
@@ -410,6 +452,218 @@ func walkP(n *html.Node, section string, doc *Document, skipChrome bool) string 
 		section = walk(c, section, doc, skipChrome)
 	}
 	return section
+}
+
+// walkTaleo reads a Taleo job fragment. Bullets are paragraphs, not li.
+// A heading that contains the whole word requirements opens requirements.
+// A Post: paragraph fills an empty title. Other paragraphs stay in the
+// current section. A short label that is only a strong opens a gap.
+// The word or stays in the current section. A label with text after the
+// colon is kept, then the gap opens.
+func walkTaleo(n *html.Node, section string, doc *Document) string {
+	if n.Type == html.ElementNode {
+		switch n.Data {
+		case "script", "style", "svg":
+			return section
+		case "li":
+			addTaleoItem(doc, section, textOf(n))
+			return section
+		case "p":
+			return walkTaleoP(n, section, doc)
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		section = walkTaleo(c, section, doc)
+	}
+	return section
+}
+
+func walkTaleoP(n *html.Node, section string, doc *Document) string {
+	raw := textOf(n)
+	norm := normalizeHeading(raw)
+	if utf8.RuneCountInString(norm) <= maxHeadingRunes {
+		if kind, ok := classify(norm); ok {
+			return kind
+		}
+		if taleoRequirementHeading(norm) {
+			return sectionRequirements
+		}
+	}
+	if _, ok := taleoGapLabel(n, norm); ok {
+		if taleoLabelHasBody(raw) {
+			noteTaleoTitle(doc, raw)
+			addTaleoItem(doc, section, raw)
+		}
+		return sectionGap
+	}
+	noteTaleoTitle(doc, raw)
+	addTaleoItem(doc, section, raw)
+	return section
+}
+
+func taleoRequirementHeading(norm string) bool {
+	for _, word := range strings.Fields(norm) {
+		if word == "requirements" {
+			return true
+		}
+	}
+	return false
+}
+
+func taleoGapLabel(n *html.Node, norm string) (string, bool) {
+	if norm == "" || norm == "or" || !taleoLabelOnly(n, norm) {
+		return "", false
+	}
+	return sectionGap, true
+}
+
+func taleoLabelHasBody(raw string) bool {
+	_, rest, ok := strings.Cut(raw, ":")
+	return ok && strings.TrimSpace(rest) != ""
+}
+
+func taleoLabelOnly(n *html.Node, norm string) bool {
+	var found bool
+	var visit func(*html.Node)
+	visit = func(node *html.Node) {
+		if found || node == nil || node.Type != html.ElementNode {
+			return
+		}
+		if node.Data == "strong" {
+			text := textOf(node)
+			if normalizeHeading(text) == norm {
+				if kind, ok := taleoStrong(text); ok && kind == sectionGap {
+					found = true
+				}
+			}
+			return
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			visit(c)
+		}
+	}
+	visit(n)
+	return found
+}
+
+func taleoStrong(text string) (string, bool) {
+	norm := normalizeHeading(text)
+	if kind, ok := classify(norm); ok {
+		return kind, true
+	}
+	if taleoRequirementHeading(norm) {
+		return sectionRequirements, true
+	}
+	if n := utf8.RuneCountInString(norm); n >= 1 && n <= maxGapRunes {
+		return sectionGap, true
+	}
+	return "", false
+}
+
+func noteTaleoTitle(doc *Document, raw string) {
+	if doc.Header.TitleBlock != "" {
+		return
+	}
+	title, ok := taleoPostTitle(raw)
+	if !ok {
+		return
+	}
+	doc.Header.TitleBlock = redact(title)
+}
+
+func taleoPostTitle(raw string) (string, bool) {
+	label, rest, ok := strings.Cut(raw, ":")
+	if !ok || !strings.EqualFold(strings.TrimSpace(label), "post") {
+		return "", false
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
+func addTaleoItem(doc *Document, section, text string) {
+	if section == "" || section == sectionGap {
+		section = sectionTrailer
+	}
+	add(doc, section, text)
+}
+
+// taleoFragment returns the body of the first job HTML part in
+// input name=initialHistory. The value is percent-decoded, and Taleo
+// \: escapes are colons. A page without that part returns nil.
+func taleoFragment(root *html.Node) *html.Node {
+	input := findInput(root, "initialHistory")
+	if input == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(attr(input, "value"))
+	if raw == "" {
+		return nil
+	}
+	decoded := pathUnescapeKeep(raw)
+	decoded = strings.ReplaceAll(decoded, `\:`, `:`)
+	var frag string
+	for _, part := range strings.Split(decoded, "!|!") {
+		part = strings.TrimPrefix(part, "!*!")
+		if strings.Contains(strings.ToLower(part), "<p") {
+			frag = part
+			break
+		}
+	}
+	if frag == "" {
+		return nil
+	}
+	parsed, err := html.Parse(strings.NewReader(frag))
+	if err != nil {
+		return nil
+	}
+	body := findElement(parsed, "body")
+	if body == nil || strings.TrimSpace(textOf(body)) == "" {
+		return nil
+	}
+	return body
+}
+
+// pathUnescapeKeep decodes %HH sequences and leaves a stray % in place.
+// url.PathUnescape rejects the whole Taleo value when one % is not hex.
+func pathUnescapeKeep(s string) string {
+	if decoded, err := url.PathUnescape(s); err == nil {
+		return decoded
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) && isHex(s[i+1]) && isHex(s[i+2]) {
+			if part, err := url.PathUnescape(s[i : i+3]); err == nil {
+				b.WriteString(part)
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func isHex(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func findInput(n *html.Node, name string) *html.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Type == html.ElementNode && n.Data == "input" && attr(n, "name") == name {
+		return n
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := findInput(c, name); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 // sectionStrong classifies a strong for Parse, or opens a gap when the

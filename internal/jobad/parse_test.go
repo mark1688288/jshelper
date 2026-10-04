@@ -713,6 +713,73 @@ func TestParsePlainParagraph(t *testing.T) {
 	}
 }
 
+func TestParseTaleoInitialHistory(t *testing.T) {
+	page := `<title>Careers at Hospital Authority</title>
+<meta property="og:title" content="OG Supplies Supervisor">
+<nav><p>CHROME-NOTICE</p><ul><li>CHROME-LI</li></ul></nav>
+<input type="hidden" name="initialHistory" id="initialHistory" value="ftlx0!|!100%!|!!*!<p><strong>Application Deadline: 16 October 2026</strong></p><p><strong>Post:</strong> Supplies Supervisor II</p><p><strong>Key Responsibilities\:</strong></p><p>Buy supplies</p><p><strong>Entry Requirements:</strong></p><p>Know stores person@example.com</p><p><strong>OR</strong></p><p>Second path</p><p><strong>Preferable attributes:</strong></p><p>Excel helps</p>">`
+	doc := parseHTML(t, page)
+	if doc.Header.TitleBlock != "Supplies Supervisor II" || doc.Header.Company != "" || doc.Header.Location != "" {
+		t.Fatalf("header = %+v", doc.Header)
+	}
+	if strings.Join(doc.Duties, "|") != "Buy supplies" {
+		t.Fatalf("duties = %#v", doc.Duties)
+	}
+	if strings.Join(doc.Requirements, "|") != "Know stores|OR|Second path" {
+		t.Fatalf("requirements = %#v", doc.Requirements)
+	}
+	if strings.Join(doc.Trailer, "|") != "Application Deadline: 16 October 2026|Post: Supplies Supervisor II|Excel helps" {
+		t.Fatalf("trailer = %#v", doc.Trailer)
+	}
+	if len(doc.Benefits) != 0 {
+		t.Fatalf("benefits = %#v", doc.Benefits)
+	}
+	raw := string(marshal(t, doc))
+	for _, leak := range []string{"CHROME-NOTICE", "CHROME-LI", "Careers at Hospital Authority", "OG Supplies Supervisor", "person@example.com", "initialHistory", "Key Responsibilities"} {
+		if strings.Contains(raw, leak) {
+			t.Fatalf("json contains %s:\n%s", leak, raw)
+		}
+	}
+
+	blocks, err := CollectBlocks([]byte(page))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(blocks))
+	for i, block := range blocks {
+		got[i] = block.Heading + " | " + block.Text
+	}
+	want := []string{
+		" | Application Deadline: 16 October 2026",
+		"Application Deadline: 16 October 2026 | Post: Supplies Supervisor II",
+		"Key Responsibilities: | Buy supplies",
+		"Entry Requirements: | Know stores",
+		"Entry Requirements: | OR",
+		"Entry Requirements: | Second path",
+		"Preferable attributes: | Excel helps",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("blocks = %#v", got)
+	}
+
+	kept := `<p><strong>Requirements</strong></p><ul><li>Know Go</li></ul>
+<input type="hidden" name="initialHistory" value="!*!<p>SECRET-HISTORY</p>">`
+	doc = parseHTML(t, kept)
+	if strings.Join(doc.Requirements, "|") != "Know Go" {
+		t.Fatalf("requirements = %#v", doc.Requirements)
+	}
+	if strings.Contains(string(marshal(t, doc)), "SECRET-HISTORY") {
+		t.Fatalf("history replaced a page that already had requirements:\n%s", marshal(t, doc))
+	}
+
+	jobsdb := `<input type="hidden" name="initialHistory" value="!*!<p>SECRET-HISTORY</p>">
+<div data-automation="jobAdDetails"></div>`
+	doc = parseHTML(t, jobsdb)
+	if !sectionsEmpty(doc) || strings.Contains(string(marshal(t, doc)), "SECRET-HISTORY") {
+		t.Fatalf("jobsdb doc = %+v", doc)
+	}
+}
+
 func mustJSON(t *testing.T, v any) string {
 	t.Helper()
 	raw, err := json.Marshal(v)
