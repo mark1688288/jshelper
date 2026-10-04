@@ -67,6 +67,49 @@ func TestDraftPromptShape(t *testing.T) {
 	}
 }
 
+func TestReflowTemplate(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"placeholders", "\n[Your\n \nname]\n \n[Email]\n", "[Your name] [Email]"},
+		{"prose then fragment", "Dear team\nada@example.com", "Dear team\nada@example.com"},
+		{"one fragment", "ada@example.com", "ada@example.com"},
+		{"name then email", "Ada Lovelace\nada@example.com", "Ada Lovelace\nada@example.com"},
+		{"blank between prose", "I write to apply.\n\nI have led teams.", "I write to apply.\n\nI have led teams."},
+		{"leading newline", "\nDRAFT-TEMPLATE-SENTINEL", "DRAFT-TEMPLATE-SENTINEL"},
+		{"crlf", "Dear team\r\nada@example.com", "Dear team\nada@example.com"},
+		{"bare cr", "I write to apply.\rI have led teams.", "I write to apply.\nI have led teams."},
+		{"prose without spacer", "I write to apply.\nI have led teams.", "I write to apply.\nI have led teams."},
+		{"several spacers", "I write to apply.\n\n\nI have led teams.", "I write to apply.\n\nI have led teams."},
+		{"prose spaces", "I  write   to apply.", "I write to apply."},
+		{"run then prose", "[Your\n \nname]\n\nDear hiring manager", "[Your name]\n\nDear hiring manager"},
+	}
+	for _, c := range cases {
+		got := reflowTemplate(c.in)
+		if got != c.want || strings.HasSuffix(got, "\n") {
+			t.Fatalf("%s =\n%q\nwant =\n%q", c.name, got, c.want)
+		}
+	}
+
+	doc := Document{
+		Header:       Header{TitleBlock: "System Analyst"},
+		Requirements: []string{"Know Go"},
+	}
+	got, err := DraftPrompt(doc, "\n[Your\n \nname]\n \n[Email]\nada@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantTail = "Template:\n[Your name] [Email] ada@example.com\n"
+	if !strings.HasSuffix(got, wantTail) {
+		t.Fatalf("prompt =\n%s", got)
+	}
+	if strings.Contains(got, "[Your\n") {
+		t.Fatalf("prompt kept a fragment break\n%s", got)
+	}
+}
+
 func TestDraftPromptOmitsUnusedFields(t *testing.T) {
 	doc := Document{
 		Source: "source-token-9f3a.html",
@@ -305,7 +348,7 @@ func TestDraftAvailableThenRespond(t *testing.T) {
 	if LetterSchema != wantSchema || LetterSchema == AnalysisSchema {
 		t.Fatalf("schema = %q", LetterSchema)
 	}
-	const wantInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. Keep the template's language, salutation shape, closing, and paragraph shape. Keep an applicant name or contact line only when the template gives that line as real text. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, and Requirements. Title is the role being applied for, not the applicant's current job. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, and do not use an employer from the template's previous role. When Company is (none), do not invent an employer and do not write (none) into the letter. Rewrite the body for this job's Duties and Requirements. Do not invent a recipient, job board, compliment, current job title, degree, date, or years of experience that appears in neither the template nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
+	const wantInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. The template's line breaks are PDF extraction artifacts, not the letter's layout. Do not copy them. Do not put each word on its own line, and do not write a line that is only a space. Write a normal cover letter: a salutation on one line, then body paragraphs of complete sentences, with several sentences in each paragraph and one blank line between paragraphs, then a closing on one line. Keep the template's language. Keep an applicant name or contact line only when the template gives that line as real text. When a real contact line is kept, put that line on its own line. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, and Requirements. Title is the role being applied for, not the applicant's current job. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, and do not use an employer from the template's previous role. When Company is (none), do not invent an employer and do not write (none) into the letter. Rewrite the body for this job's Duties and Requirements. Do not invent a recipient, job board, compliment, current job title, degree, date, or years of experience that appears in neither the template nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
 	if DraftInstructions != wantInstructions || strings.Contains(DraftInstructions, "\n") {
 		t.Fatalf("instructions = %q", DraftInstructions)
 	}
