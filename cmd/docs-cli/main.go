@@ -32,6 +32,7 @@ commands:
   auth
   setup
   parse --html PATH [--autoparse]
+  parse --txt PATH
   gemini-key
   analyze --json PATH
   draft --json PATH --template PATH
@@ -44,6 +45,7 @@ create:
 
 parse:
   --html PATH      saved job HTML file
+  --txt PATH       job details text file
   --autoparse      send the saved HTML to Gemini
 
 gemini-key stores the Gemini API key in the keyring. The key is not a flag.
@@ -66,6 +68,7 @@ const (
 	errKeyringWarn = "docs-cli: warning: could not update keyring"
 
 	errHTMLTooLarge      = "docs-cli: html exceeds 2 MiB"
+	errTxtTooLarge       = "docs-cli: txt exceeds 2 MiB"
 	errJSONTooLarge      = "docs-cli: json exceeds 1 MiB"
 	errJobAdDetails      = "docs-cli: jobAdDetails not found"
 	errGeminiKeyMissing  = "docs-cli: gemini api key is not in the keyring"
@@ -454,6 +457,7 @@ func (d deps) createDocument(ctx context.Context, cfg *config.Config, tok *oauth
 func runParse(args []string, d deps) int {
 	fs := newFlagSet("parse", d.Stderr)
 	htmlFlag := fs.String("html", "", "saved job HTML file")
+	txtFlag := fs.String("txt", "", "job details text file")
 	auto := fs.Bool("autoparse", false, "send the saved HTML to Gemini")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -462,12 +466,34 @@ func runParse(args []string, d deps) int {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
 	}
-	htmlSet := false
+	htmlSet, txtSet, autoSet := false, false, false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "html" {
+		switch f.Name {
+		case "html":
 			htmlSet = true
+		case "txt":
+			txtSet = true
+		case "autoparse":
+			autoSet = true
 		}
 	})
+	// --txt always uses autoparse. It cannot be combined with --html or --autoparse.
+	if txtSet && (htmlSet || autoSet || *txtFlag == "") {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	if txtSet {
+		page, err := readHTMLFile(*txtFlag)
+		if errors.Is(err, errPageTooLarge) {
+			fmt.Fprintln(d.Stderr, errTxtTooLarge)
+			return 1
+		}
+		if err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		return runAutoparse(d, *txtFlag, page)
+	}
 	if !htmlSet || *htmlFlag == "" {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2

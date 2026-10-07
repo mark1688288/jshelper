@@ -1144,6 +1144,10 @@ func TestParseUsage(t *testing.T) {
 		{name: "no flag", args: []string{"parse"}},
 		{name: "autoparse without html", args: []string{"parse", "--autoparse"}},
 		{name: "autoparse extra value", args: []string{"parse", "--html", "page.html", "--autoparse", "yes"}},
+		{name: "html and txt", args: []string{"parse", "--html", "page.html", "--txt", "job.txt"}},
+		{name: "txt and autoparse", args: []string{"parse", "--txt", "job.txt", "--autoparse"}},
+		{name: "txt missing value", args: []string{"parse", "--txt"}},
+		{name: "txt empty", args: []string{"parse", "--txt", ""}},
 		{name: "missing value", args: []string{"parse", "--html"}},
 		{name: "unknown flag", args: []string{"parse", "--bogus"}},
 		{name: "extra arg", args: []string{"parse", "--html", "page.html", "extra"}},
@@ -1178,7 +1182,7 @@ func TestParseUsage(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  parse --html PATH [--autoparse]\n  gemini-key\n") {
+	if !strings.Contains(usageText, "\n  parse --html PATH [--autoparse]\n  parse --txt PATH\n  gemini-key\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
 	}
 }
@@ -2072,6 +2076,208 @@ func TestParseAutoparse(t *testing.T) {
 		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
 	})
 
+	t.Run("txt writes reencoded json", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		details := []byte("JOB-DETAILS-SENTINEL\nKey Responsibilities\nBuy supplies\nWrite to " + email + " today\n")
+		path := writeFile(t, "job.txt", details)
+		model, err := json.Marshal(map[string]any{
+			"source": "LEAK-SOURCE",
+			"header": map[string]any{
+				"title_block":    "Supplies Supervisor",
+				"company":        "",
+				"location":       "",
+				"work_type":      "",
+				"classification": "",
+			},
+			"benefits":     []string{},
+			"duties":       []string{"Buy supplies"},
+			"requirements": []string{"Know stores"},
+			"trailer":      []string{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cap := &geminiCapture{}
+		var stdout, stderr bytes.Buffer
+		d := deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			GeminiClient: mappingClient(t, http.StatusOK, analysisEnvelope(t, string(model)), cap),
+		}
+		forbidEnv(t, &d)
+		code := run([]string{"parse", "--txt", path}, d)
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("exit %d stderr %q stdout %s", code, stderr.String(), stdout.String())
+		}
+		want := jobad.Document{
+			Source:       path,
+			Header:       jobad.Header{TitleBlock: "Supplies Supervisor"},
+			Benefits:     []string{},
+			Duties:       []string{"Buy supplies"},
+			Requirements: []string{"Know stores"},
+			Trailer:      []string{},
+		}
+		var buf bytes.Buffer
+		if err := writeDocument(&buf, want); err != nil {
+			t.Fatal(err)
+		}
+		if stdout.String() != buf.String() {
+			t.Fatalf("stdout:\n%s\nwant:\n%s", stdout.String(), buf.String())
+		}
+		if strings.Contains(stdout.String(), "LEAK-SOURCE") || strings.Contains(stdout.String(), email) {
+			t.Fatalf("stdout %s", stdout.String())
+		}
+		kept, err := os.ReadFile(path)
+		if err != nil || string(kept) != string(details) {
+			t.Fatalf("file changed %q err %v", kept, err)
+		}
+		assertAutoparseRequest(t, cap, apiKey, string(details))
+		if strings.Contains(cap.body, "<html") || strings.Contains(cap.body, "<p>") || !strings.Contains(cap.body, "JOB-DETAILS-SENTINEL") {
+			t.Fatalf("body %s", cap.body)
+		}
+		assertRefreshUntouched(t)
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+	})
+
+	t.Run("txt ignores extension", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		details := []byte("JOB-DETAILS-SENTINEL\nBuy supplies\n")
+		path := writeFile(t, "job.dat", details)
+		model, err := json.Marshal(map[string]any{
+			"source": "",
+			"header": map[string]any{
+				"title_block":    "",
+				"company":        "",
+				"location":       "",
+				"work_type":      "",
+				"classification": "",
+			},
+			"benefits":     []string{},
+			"duties":       []string{"Buy supplies"},
+			"requirements": []string{"Know stores"},
+			"trailer":      []string{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cap := &geminiCapture{}
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"parse", "--txt", path}, deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			GeminiClient: mappingClient(t, http.StatusOK, analysisEnvelope(t, string(model)), cap),
+		})
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("exit %d stderr %q stdout %s", code, stderr.String(), stdout.String())
+		}
+		var got jobad.Document
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Source != path || strings.Join(got.Duties, "|") != "Buy supplies" {
+			t.Fatalf("doc %+v", got)
+		}
+		assertAutoparseRequest(t, cap, apiKey, string(details))
+		if strings.Contains(cap.body, "<html") {
+			t.Fatalf("body %s", cap.body)
+		}
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+	})
+
+	t.Run("html txt does not autoparse", func(t *testing.T) {
+		for _, name := range []string{"job.txt", "job.TXT"} {
+			t.Run(name, func(t *testing.T) {
+				keyring.MockInit()
+				if err := jobad.StoreGeminiKey(apiKey); err != nil {
+					t.Fatal(err)
+				}
+				path := writeFile(t, name, []byte("JOB-DETAILS-SENTINEL\nBuy supplies\n"))
+				stdout, stderr, code := runParseArgs(t, []string{"parse", "--html", path}, nil)
+				if code != 1 || stdout != "" || stderr != errJobAdDetails+"\n" {
+					t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+				}
+			})
+		}
+	})
+
+	t.Run("txt combined flags do not read", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		html := writeFile(t, "job.html", page)
+		missing := filepath.Join(t.TempDir(), "missing.txt")
+		cases := [][]string{
+			{"parse", "--html", html, "--txt", missing},
+			{"parse", "--txt", missing, "--autoparse"},
+		}
+		for _, args := range cases {
+			var stdout, stderr bytes.Buffer
+			code := run(args, deps{
+				Stdin:        strings.NewReader(""),
+				Stdout:       &stdout,
+				Stderr:       &stderr,
+				GeminiClient: blockGemini(t),
+			})
+			if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "usage: docs-cli") {
+				t.Fatalf("args %v exit %d stdout %q stderr %q", args, code, stdout.String(), stderr.String())
+			}
+		}
+	})
+
+	t.Run("txt no key non tty", func(t *testing.T) {
+		keyring.MockInit()
+		path := writeFile(t, "job.txt", []byte("JOB-DETAILS-SENTINEL\n"))
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"parse", "--txt", path}, deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout.Len() != 0 || stderr.String() != errGeminiKeyMissing+"\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stderr.String(), errJobAdDetails) {
+			t.Fatalf("stderr %q", stderr.String())
+		}
+	})
+
+	t.Run("txt too large", func(t *testing.T) {
+		keyring.MockInit()
+		over := writeFile(t, "over.txt", bytes.Repeat([]byte{'x'}, maxHTMLBytes+1))
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"parse", "--txt", over}, deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout.Len() != 0 || stderr.String() != errTxtTooLarge+"\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("txt missing file", func(t *testing.T) {
+		keyring.MockInit()
+		missing := filepath.Join(t.TempDir(), "missing.txt")
+		stdout, stderr, code := runParseArgs(t, []string{"parse", "--txt", missing}, nil)
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || strings.Contains(stderr, errJobAdDetails) {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+	})
+
 	if len(fmCalls) != 0 {
 		t.Fatalf("fm calls %d", len(fmCalls))
 	}
@@ -2114,7 +2320,7 @@ func assertAutoparseRequest(t *testing.T, cap *geminiCapture, apiKey, page strin
 	if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || req.Contents[0].Parts[0].Text != redacted {
 		t.Fatalf("user text %q", req.Contents)
 	}
-	if !strings.Contains(req.Contents[0].Parts[0].Text, "<script>AUTOPARSE-HTML-SENTINEL</script>") {
+	if strings.Contains(page, "AUTOPARSE-HTML-SENTINEL") && !strings.Contains(req.Contents[0].Parts[0].Text, "<script>AUTOPARSE-HTML-SENTINEL</script>") {
 		t.Fatalf("user text %s", req.Contents[0].Parts[0].Text)
 	}
 	if req.GenerationConfig.Mime != "application/json" || bytes.Contains(req.GenerationConfig.Schema, []byte(`"additionalProperties"`)) {
