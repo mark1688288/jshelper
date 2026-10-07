@@ -1,7 +1,8 @@
-// Package docs creates one Google Doc in a Drive folder.
+// Package docs creates one Google Doc in a Drive folder and uploads JSON files there.
 package docs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ const MaxBodyBytes = 1 << 20 // 1048576
 const (
 	GoogleDocMime   = "application/vnd.google-apps.document"
 	DriveFolderMime = "application/vnd.google-apps.folder"
+	JSONMime        = "application/json"
 )
 
 // rpcTimeout is the deadline for one Drive or Docs RPC.
@@ -36,6 +38,17 @@ var (
 // EditURL is the browser URL for a document id.
 func EditURL(documentID string) string {
 	return "https://docs.google.com/document/d/" + documentID + "/edit"
+}
+
+// FileURL is the browser URL for an uploaded Drive file id.
+func FileURL(fileID string) string {
+	return "https://drive.google.com/file/d/" + fileID + "/view"
+}
+
+// JSONFile is one JSON upload. Name is the Drive file name. Body is the original bytes.
+type JSONFile struct {
+	Name string
+	Body []byte
 }
 
 // NewDocsService builds a Docs client. Extra options are for tests.
@@ -69,26 +82,8 @@ func CreateDocument(ctx context.Context, driveSvc *drive.Service, docsSvc *docsa
 		return "", errors.New("docs-cli: error: missing Google service")
 	}
 
-	getCtx, cancelGet := rpcContext(ctx)
-	got, err := driveSvc.Files.Get(folderID).
-		SupportsAllDrives(true).
-		Fields("id,mimeType,name,trashed").
-		Context(getCtx).Do()
-	cancelGet()
-	if err != nil {
-		if code := statusCode(err); code == http.StatusNotFound || code == http.StatusForbidden {
-			return "", fmt.Errorf("docs-cli: folder not found or not accessible: %s", folderID)
-		}
-		return "", fmt.Errorf("docs-cli: error: %s", publicErr(err))
-	}
-	if got == nil {
-		return "", errors.New("docs-cli: error: files.get returned no file")
-	}
-	if got.MimeType != DriveFolderMime {
-		return "", fmt.Errorf("docs-cli: GOOGLE_DRIVE_FOLDER_ID is not a folder: %s", folderID)
-	}
-	if got.Trashed {
-		return "", fmt.Errorf("docs-cli: folder is in the trash: %s", folderID)
+	if err := requireFolder(ctx, driveSvc, folderID); err != nil {
+		return "", err
 	}
 
 	createCtx, cancelCreate := rpcContext(ctx)
@@ -123,6 +118,77 @@ func CreateDocument(ctx context.Context, driveSvc *drive.Service, docsSvc *docsa
 	cancelUpdate()
 	if err != nil {
 		return created.Id, fmt.Errorf("docs-cli: insertText failed; document was created: %s", created.Id)
+	}
+	return created.Id, nil
+}
+
+// UploadJSON checks folderID once, then creates one application/json file per item.
+// A later failure returns the ids already created. Those files stay in the folder.
+func UploadJSON(ctx context.Context, driveSvc *drive.Service, folderID string, files []JSONFile) ([]string, error) {
+	if folderID == "" {
+		return nil, errFolderNeeded
+	}
+	if driveSvc == nil {
+		return nil, errors.New("docs-cli: error: missing Google service")
+	}
+	if err := requireFolder(ctx, driveSvc, folderID); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(files))
+	for _, file := range files {
+		id, err := createJSONFile(ctx, driveSvc, folderID, file)
+		if err != nil {
+			return ids, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func requireFolder(ctx context.Context, driveSvc *drive.Service, folderID string) error {
+	getCtx, cancelGet := rpcContext(ctx)
+	got, err := driveSvc.Files.Get(folderID).
+		SupportsAllDrives(true).
+		Fields("id,mimeType,name,trashed").
+		Context(getCtx).Do()
+	cancelGet()
+	if err != nil {
+		if code := statusCode(err); code == http.StatusNotFound || code == http.StatusForbidden {
+			return fmt.Errorf("docs-cli: folder not found or not accessible: %s", folderID)
+		}
+		return fmt.Errorf("docs-cli: error: %s", publicErr(err))
+	}
+	if got == nil {
+		return errors.New("docs-cli: error: files.get returned no file")
+	}
+	if got.MimeType != DriveFolderMime {
+		return fmt.Errorf("docs-cli: GOOGLE_DRIVE_FOLDER_ID is not a folder: %s", folderID)
+	}
+	if got.Trashed {
+		return fmt.Errorf("docs-cli: folder is in the trash: %s", folderID)
+	}
+	return nil
+}
+
+func createJSONFile(ctx context.Context, driveSvc *drive.Service, folderID string, file JSONFile) (string, error) {
+	createCtx, cancelCreate := rpcContext(ctx)
+	created, err := driveSvc.Files.Create(&drive.File{
+		Name:     file.Name,
+		MimeType: JSONMime,
+		Parents:  []string{folderID},
+	}).Media(bytes.NewReader(file.Body), googleapi.ContentType(JSONMime)).
+		SupportsAllDrives(true).
+		Fields("id,parents").
+		Context(createCtx).Do()
+	cancelCreate()
+	if err != nil {
+		return "", fmt.Errorf("docs-cli: error: %s", publicErr(err))
+	}
+	if created == nil || created.Id == "" {
+		return "", errors.New("docs-cli: error: files.create returned an empty id")
+	}
+	if !hasParent(created.Parents, folderID) {
+		return "", fmt.Errorf("docs-cli: file parent is not the requested folder: %s", folderID)
 	}
 	return created.Id, nil
 }

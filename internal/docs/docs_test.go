@@ -1,10 +1,13 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,6 +37,12 @@ func TestRPCTimeoutIsOneMinute(t *testing.T) {
 
 func TestEditURL(t *testing.T) {
 	if got, want := EditURL(testDocID), "https://docs.google.com/document/d/"+testDocID+"/edit"; got != want {
+		t.Fatalf("url %q", got)
+	}
+}
+
+func TestFileURL(t *testing.T) {
+	if got, want := FileURL(testDocID), "https://drive.google.com/file/d/"+testDocID+"/view"; got != want {
 		t.Fatalf("url %q", got)
 	}
 }
@@ -315,14 +324,182 @@ func TestGetFailureHidesAuthorization(t *testing.T) {
 	}
 }
 
+func TestUploadJSONTwoFiles(t *testing.T) {
+	const (
+		id1 = "file1111111111"
+		id2 = "file2222222222"
+	)
+	one := []byte("{\n  \"k\": \"ONE\"\n}\n")
+	two := []byte("[1, 2, 3]")
+	rec := &recorder{
+		getBody: folderJSON(testFolderID, DriveFolderMime, false),
+		uploads: []uploadReply{
+			{body: fileJSON(id1, testFolderID)},
+			{body: fileJSON(id2, testFolderID)},
+		},
+	}
+	driveSvc, _ := newServices(t, rec)
+	ids, err := UploadJSON(context.Background(), driveSvc, testFolderID, []JSONFile{
+		{Name: "1.json", Body: one},
+		{Name: "2.json", Body: two},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != id1 || ids[1] != id2 {
+		t.Fatalf("ids %#v", ids)
+	}
+	var gets, creates int
+	for _, call := range rec.snapshot() {
+		if deadlineBad(call.remain) {
+			t.Fatalf("deadline remain %s for %s", call.remain, call.path)
+		}
+		switch {
+		case call.method == http.MethodGet && call.path == "/files/"+testFolderID:
+			gets++
+			if call.query("supportsAllDrives") != "true" || call.query("fields") != "id,mimeType,name,trashed" {
+				t.Fatalf("get query %s", call.rawQuery)
+			}
+		case call.method == http.MethodPost && call.path == "/upload/drive/v3/files":
+			creates++
+			if call.query("uploadType") != "multipart" || call.query("supportsAllDrives") != "true" || call.query("fields") != "id,parents" {
+				t.Fatalf("upload query %s", call.rawQuery)
+			}
+			payload := one
+			name := "1.json"
+			if creates == 2 {
+				payload = two
+				name = "2.json"
+			}
+			assertMultipartUpload(t, call, name, testFolderID, payload)
+		default:
+			t.Fatalf("unexpected %s %s", call.method, call.path)
+		}
+	}
+	if gets != 1 || creates != 2 {
+		t.Fatalf("gets %d creates %d", gets, creates)
+	}
+}
+
+func TestUploadFolderDeniedDoesNotCreate(t *testing.T) {
+	rec := &recorder{getStatus: http.StatusNotFound, getBody: `{"error":{"code":404,"message":"nope"}}`}
+	driveSvc, _ := newServices(t, rec)
+	ids, err := UploadJSON(context.Background(), driveSvc, testFolderID, []JSONFile{{Name: "1.json", Body: []byte("{}")}})
+	if err == nil || !strings.Contains(err.Error(), "folder not found or not accessible: "+testFolderID) {
+		t.Fatalf("ids %#v err %v", ids, err)
+	}
+	if len(ids) != 0 || rec.count(http.MethodPost, "/upload/drive/v3/files") != 0 {
+		t.Fatalf("ids %#v calls %d", ids, rec.count(http.MethodPost, "/upload/drive/v3/files"))
+	}
+}
+
+func TestUploadSecondCreateKeepsFirstID(t *testing.T) {
+	const id1 = "file1111111111"
+	rec := &recorder{
+		getBody: folderJSON(testFolderID, DriveFolderMime, false),
+		uploads: []uploadReply{
+			{body: fileJSON(id1, testFolderID)},
+			{status: http.StatusInternalServerError, body: `{"error":{"code":500,"message":"second failed"}}`},
+		},
+	}
+	driveSvc, _ := newServices(t, rec)
+	ids, err := UploadJSON(context.Background(), driveSvc, testFolderID, []JSONFile{
+		{Name: "1.json", Body: []byte(`{"n":1}`)},
+		{Name: "2.json", Body: []byte(`{"n":2}`)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "docs-cli: error:") || !strings.Contains(err.Error(), "second failed") {
+		t.Fatalf("ids %#v err %v", ids, err)
+	}
+	if len(ids) != 1 || ids[0] != id1 {
+		t.Fatalf("ids %#v", ids)
+	}
+	if rec.count(http.MethodPost, "/upload/drive/v3/files") != 2 {
+		t.Fatalf("creates %d", rec.count(http.MethodPost, "/upload/drive/v3/files"))
+	}
+}
+
+func TestUploadEmptyFolderBeforeHTTP(t *testing.T) {
+	rec := &recorder{}
+	driveSvc, _ := newServices(t, rec)
+	ids, err := UploadJSON(context.Background(), driveSvc, "", []JSONFile{{Name: "1.json", Body: []byte("{}")}})
+	if err == nil || !strings.Contains(err.Error(), "GOOGLE_DRIVE_FOLDER_ID is required") {
+		t.Fatalf("ids %#v err %v", ids, err)
+	}
+	if len(ids) != 0 || len(rec.snapshot()) != 0 {
+		t.Fatalf("ids %#v calls %d", ids, len(rec.snapshot()))
+	}
+}
+
+func TestUploadParentMismatch(t *testing.T) {
+	rec := &recorder{
+		getBody: folderJSON(testFolderID, DriveFolderMime, false),
+		uploads: []uploadReply{{body: fileJSON(testDocID, "otherFolder1")}},
+	}
+	driveSvc, _ := newServices(t, rec)
+	ids, err := UploadJSON(context.Background(), driveSvc, testFolderID, []JSONFile{{Name: "1.json", Body: []byte("{}")}})
+	want := "docs-cli: file parent is not the requested folder: " + testFolderID
+	if err == nil || err.Error() != want || len(ids) != 0 {
+		t.Fatalf("ids %#v err %v", ids, err)
+	}
+}
+
+func assertMultipartUpload(t *testing.T, call apiCall, name, folderID string, payload []byte) {
+	t.Helper()
+	mediaType, params, err := mime.ParseMediaType(call.contentType)
+	if err != nil || mediaType != "multipart/related" || params["boundary"] == "" {
+		t.Fatalf("content type %q err %v", call.contentType, err)
+	}
+	parts := multipart.NewReader(bytes.NewReader(call.body), params["boundary"])
+	metaPart, err := parts.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metaRaw, err := io.ReadAll(metaPart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta struct {
+		Name     string   `json:"name"`
+		MimeType string   `json:"mimeType"`
+		Parents  []string `json:"parents"`
+	}
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		t.Fatalf("meta %s: %v", metaRaw, err)
+	}
+	if meta.Name != name || meta.MimeType != JSONMime || len(meta.Parents) != 1 || meta.Parents[0] != folderID {
+		t.Fatalf("meta %s", metaRaw)
+	}
+	if meta.MimeType == GoogleDocMime || bytesContains(metaRaw, GoogleDocMime) {
+		t.Fatalf("meta %s", metaRaw)
+	}
+	mediaPart, err := parts.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mediaPart.Header.Get("Content-Type"); got != JSONMime {
+		t.Fatalf("media type %q", got)
+	}
+	media, err := io.ReadAll(mediaPart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(media, payload) {
+		t.Fatalf("media %q", media)
+	}
+	if _, err := parts.NextPart(); err != io.EOF {
+		t.Fatalf("extra part %v", err)
+	}
+}
+
 type apiCall struct {
-	method   string
-	path     string
-	rawQuery string
-	host     string
-	body     []byte
-	remain   time.Duration
-	queryFn  func(string) string
+	method      string
+	path        string
+	rawQuery    string
+	host        string
+	contentType string
+	body        []byte
+	remain      time.Duration
+	queryFn     func(string) string
 }
 
 func (c apiCall) query(key string) string {
@@ -342,6 +519,13 @@ type recorder struct {
 	createBody   string
 	updateStatus int
 	updateBody   string
+	uploads      []uploadReply
+	uploadN      int
+}
+
+type uploadReply struct {
+	status int
+	body   string
 }
 
 func (r *recorder) noteDeadline(path string, remain time.Duration) {
@@ -362,7 +546,32 @@ func (r *recorder) deadlineFor(path string) time.Duration {
 func (r *recorder) reset() {
 	r.mu.Lock()
 	r.calls = nil
+	r.uploadN = 0
 	r.mu.Unlock()
+}
+
+func (r *recorder) takeUpload() (int, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.uploads) == 0 {
+		body := r.createBody
+		if body == "" {
+			body = `{}`
+		}
+		return statusOr(r.createStatus, http.StatusOK), body
+	}
+	i := r.uploadN
+	if i >= len(r.uploads) {
+		i = len(r.uploads) - 1
+	} else {
+		r.uploadN++
+	}
+	rep := r.uploads[i]
+	body := rep.body
+	if body == "" {
+		body = `{}`
+	}
+	return statusOr(rep.status, http.StatusOK), body
 }
 
 func (r *recorder) snapshot() []apiCall {
@@ -387,13 +596,14 @@ func (r *recorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	body, _ := io.ReadAll(req.Body)
 	q := req.URL.Query()
 	call := apiCall{
-		method:   req.Method,
-		path:     req.URL.Path,
-		rawQuery: req.URL.RawQuery,
-		host:     req.Host,
-		body:     body,
-		remain:   r.deadlineFor(req.URL.Path),
-		queryFn:  q.Get,
+		method:      req.Method,
+		path:        req.URL.Path,
+		rawQuery:    req.URL.RawQuery,
+		host:        req.Host,
+		contentType: req.Header.Get("Content-Type"),
+		body:        body,
+		remain:      r.deadlineFor(req.URL.Path),
+		queryFn:     q.Get,
 	}
 	r.mu.Lock()
 	r.calls = append(r.calls, call)
@@ -405,6 +615,8 @@ func (r *recorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		status, payload = statusOr(r.getStatus, http.StatusOK), r.getBody
 	case req.Method == http.MethodPost && req.URL.Path == "/files":
 		status, payload = statusOr(r.createStatus, http.StatusOK), r.createBody
+	case req.Method == http.MethodPost && req.URL.Path == "/upload/drive/v3/files":
+		status, payload = r.takeUpload()
 	case req.Method == http.MethodPost && strings.Contains(req.URL.Path, ":batchUpdate"):
 		status, payload = statusOr(r.updateStatus, http.StatusOK), r.updateBody
 	default:

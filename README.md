@@ -11,7 +11,9 @@ Do not commit `.env`, `credentials.json`, `token.json`, `/design`, an OAuth clie
 
 `docs-cli` creates one Google Doc in a Drive folder you already have. There is one setup path. Decide `GCP_PROJECT_ID` before you create the OAuth client. That id is the Cloud project that owns the client and the enabled APIs. It is separate from the Drive folder. `GCP_FOLDER_ID` is an optional Cloud Resource Manager folder. `GOOGLE_DRIVE_FOLDER_ID` is the Drive folder, and `create` requires it.
 
-The consent screen authorizes this app to see, edit, create, and delete all of your Google Drive files. The program only reads the one folder you name and creates one document there.
+`upload` copies one or more `.json` files into that same folder. Each file is stored as `application/json`.
+
+The consent screen authorizes this app to see, edit, create, and delete all of your Google Drive files. The program only reads the one folder you name. `create` adds one document there. `upload` adds the JSON files you name.
 
 ## Prerequisites
 
@@ -20,7 +22,7 @@ The consent screen authorizes this app to see, edit, create, and delete all of y
 - Go 1.27.1
 - Google Cloud CLI (`gcloud`), logged in
 - A Google account for the support email and the Testing test user
-- An existing Google Drive folder; `create` needs `GOOGLE_DRIVE_FOLDER_ID`
+- An existing Google Drive folder; `create` and `upload` need `GOOGLE_DRIVE_FOLDER_ID`
 - macOS Keychain for the refresh token; the first `auth` may prompt
 - `fm` (`/usr/bin/fm`), with Apple Intelligence turned on
 
@@ -95,7 +97,7 @@ go build -o docs-cli -ldflags "-X github.com/mark1688288/jshelper/internal/confi
 
 There is one Console order. The client id exists only after a Desktop client is created in that Cloud project. Browser consent does not create the client id.
 
-1. Decide `GCP_PROJECT_ID`. That id is the Cloud project that owns the OAuth client and the enabled APIs. It is separate from the Drive folder. `GCP_FOLDER_ID` is an optional Cloud Resource Manager folder. `GOOGLE_DRIVE_FOLDER_ID` is the Drive folder, and `create` requires it.
+1. Decide `GCP_PROJECT_ID`. That id is the Cloud project that owns the OAuth client and the enabled APIs. It is separate from the Drive folder. `GCP_FOLDER_ID` is an optional Cloud Resource Manager folder. `GOOGLE_DRIVE_FOLDER_ID` is the Drive folder, and `create` and `upload` require it.
 
 2. Create the Cloud project when it is missing and enable `docs.googleapis.com` and `drive.googleapis.com`. You need a logged-in `gcloud`. Bootstrap does not create a Drive folder and does not move an OAuth client.
 
@@ -117,7 +119,7 @@ There is one Console order. The client id exists only after a Desktop client is 
    - Data Access: add only `https://www.googleapis.com/auth/drive`. `https://console.cloud.google.com/auth/scopes?project=<GCP_PROJECT_ID>`
    - Clients: Desktop app named `Docs CLI Desktop`. `https://console.cloud.google.com/auth/clients?project=<GCP_PROJECT_ID>`
 
-   Testing can grant this restricted scope to the listed test user. This version does not publish the consent screen, so CASA is not part of setup. The consent screen authorizes this app to see, edit, create, and delete all of your Google Drive files. The program only reads the one folder you name and creates one document there.
+   Testing can grant this restricted scope to the listed test user. This version does not publish the consent screen, so CASA is not part of setup. The consent screen authorizes this app to see, edit, create, and delete all of your Google Drive files. The program only reads the one folder you name. `create` adds one document there. `upload` adds the JSON files you name.
 
 4. Put the client id and secret into the env file only after that Desktop client exists. Do not commit the secret or the folder id. `Load` rejects the placeholder email `you@gmail.com`.
 
@@ -126,6 +128,7 @@ There is one Console order. The client id exists only after a Desktop client is 
    ```bash
    go run ./cmd/docs-cli auth
    go run ./cmd/docs-cli create --title "Demo" --text "hello" --folder <folder id or folder URL>
+   go run ./cmd/docs-cli upload ./tmp/1.json ./tmp/2.json
    ```
 
    Production runs `./docs-cli setup` again. `DOCS_CLI_PROJECT_READY` already matches the project id, so this round asks only for the client id and secret, writes `credentials.json` (mode `0600`), and does not listen on a port.
