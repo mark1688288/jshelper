@@ -3575,6 +3575,435 @@ func assertNoSecret(t *testing.T, stdout, stderr, secret string) {
 	}
 }
 
+func TestUploadUsage(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		exact bool
+	}{
+		{name: "no path", args: []string{"upload"}},
+		{name: "help", args: []string{"upload", "--help"}, exact: true},
+		{name: "short help", args: []string{"upload", "-h"}, exact: true},
+		{name: "unknown flag", args: []string{"upload", "--bogus", "a.json"}},
+		{name: "title flag", args: []string{"upload", "--title", "Demo", "a.json"}},
+		{name: "html flag", args: []string{"upload", "--html", "a.json"}},
+		{name: "json flag", args: []string{"upload", "--json", "a.json"}},
+		{name: "folder missing value", args: []string{"upload", "--folder"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls callCount
+			base := calls.hooks(&config.Config{DriveFolderID: folderID}, "", nil, nil)
+			base.UploadJSON = func(context.Context, string, []docs.JSONFile) ([]string, error) {
+				t.Fatal("upload called")
+				return nil, nil
+			}
+			var stdout, stderr bytes.Buffer
+			base.Stdout = &stdout
+			base.Stderr = &stderr
+			base.Environ = []string{"APP_ENV=development"}
+			base.Root = t.TempDir()
+			code := run(tt.args, base)
+			if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "usage: docs-cli") {
+				t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+			}
+			if tt.exact && stderr.String() != usageText {
+				t.Fatalf("stderr %q", stderr.String())
+			}
+			if calls.load != 0 || calls.ensure != 0 || calls.require != 0 || calls.write != 0 || calls.auth != 0 || calls.create != 0 {
+				t.Fatalf("calls %+v", calls)
+			}
+		})
+	}
+	if !strings.Contains(usageText, "\n  draft --json PATH --template PATH\n  upload [--folder FOLDER] PATH [PATH ...]\n") {
+		t.Fatalf("usage commands:\n%s", usageText)
+	}
+}
+
+func TestUploadRejectsBeforeAuth(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "bad.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.json"), bytes.Repeat([]byte("a"), docs.MaxBodyBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "dir.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ok.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "txt", args: []string{"upload", "missing.txt"}, want: "docs-cli: not a json file: missing.txt"},
+		{name: "txt after json", args: []string{"upload", "missing.json", "notes.txt"}, want: "docs-cli: not a json file: notes.txt"},
+		{name: "no extension", args: []string{"upload", "readme"}, want: "docs-cli: not a json file: readme"},
+		{name: "bak", args: []string{"upload", "job.json.bak"}, want: "docs-cli: not a json file: job.json.bak"},
+		{name: "invalid", args: []string{"upload", "bad.json"}, want: "docs-cli: json is not valid: bad.json"},
+		{name: "too big", args: []string{"upload", "big.json"}, want: "docs-cli: json exceeds 1 MiB: big.json"},
+		{name: "directory", args: []string{"upload", "dir.json"}, want: "docs-cli: not a regular file: dir.json"},
+		{name: "bad folder", args: []string{"upload", "--folder", "abc", "missing.json"}, want: "docs-cli: GOOGLE_DRIVE_FOLDER_ID is not a Drive folder URL or id"},
+		{name: "empty folder flag", args: []string{"upload", "--folder", "", "ok.json"}, want: "docs-cli: GOOGLE_DRIVE_FOLDER_ID is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls callCount
+			base := calls.hooks(&config.Config{DriveFolderID: folderID}, "", nil, nil)
+			base.UploadJSON = func(context.Context, string, []docs.JSONFile) ([]string, error) {
+				t.Fatal("upload called")
+				return nil, nil
+			}
+			var stdout, stderr bytes.Buffer
+			base.Stdout = &stdout
+			base.Stderr = &stderr
+			base.Environ = []string{"APP_ENV=production"}
+			base.Root = dir
+			code := run(tt.args, base)
+			if code != 1 || stderr.String() != tt.want+"\n" || stdout.Len() != 0 {
+				t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+			}
+			if calls.load != 0 || calls.ensure != 0 || calls.require != 0 || calls.write != 0 || calls.auth != 0 || calls.create != 0 {
+				t.Fatalf("calls %+v", calls)
+			}
+			if strings.Contains(stderr.String(), "no such file") {
+				t.Fatalf("read a file: %s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestUploadWritesBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	one := []byte("{\n  \"k\": \"SENTINEL-ONE\"\n}\n")
+	two := []byte("[2]")
+	if err := os.Mkdir(filepath.Join(dir, "tmp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tmp", "1.json"), one, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tmp", "2.json"), two, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyring.MockInit()
+	if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+		t.Fatal(err)
+	}
+	const geminiItem = `{"api_key":"gemini-key-value"}`
+	if err := keyring.Set("docs-cli", "gemini-api-key", geminiItem); err != nil {
+		t.Fatal(err)
+	}
+	rejectFM(t)
+	var calls callCount
+	var gotFolder string
+	var got []docs.JSONFile
+	cfg := &config.Config{
+		Mode:          "development",
+		FilePath:      filepath.Join(dir, ".env.example"),
+		DriveFolderID: folderID,
+		ClientID:      "abc.apps.googleusercontent.com",
+		ClientSecret:  secretValue,
+	}
+	base := calls.hooks(cfg, "", nil, nil)
+	base.UploadJSON = func(_ context.Context, folder string, files []docs.JSONFile) ([]string, error) {
+		gotFolder = folder
+		got = append([]docs.JSONFile(nil), files...)
+		return []string{"id-one", "id-two"}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	args := []string{"upload", "./tmp/1.json", "./tmp/2.json"}
+	code := run(args, base)
+	if code != 0 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	wantOut := "./tmp/1.json\nid-one\n" + docs.FileURL("id-one") + "\n" +
+		"./tmp/2.json\nid-two\n" + docs.FileURL("id-two") + "\n"
+	if stdout.String() != wantOut {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "docs-cli: uploaded ./tmp/1.json bytes="+fmt.Sprint(len(one))) ||
+		!strings.Contains(stderr.String(), "docs-cli: uploaded ./tmp/2.json bytes="+fmt.Sprint(len(two))) {
+		t.Fatalf("stderr %s", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "SENTINEL-ONE") || strings.Contains(stderr.String(), "SENTINEL-ONE") || strings.Contains(stderr.String(), geminiItem) {
+		t.Fatalf("leaked stdout %q stderr %q", stdout.String(), stderr.String())
+	}
+	assertNoSecret(t, stdout.String(), stderr.String(), secretValue)
+	assertRefreshUntouched(t)
+	gotKey, err := keyring.Get("docs-cli", "gemini-api-key")
+	if err != nil || gotKey != geminiItem {
+		t.Fatalf("gemini key %q err %v", gotKey, err)
+	}
+	if gotFolder != folderID || len(got) != 2 || got[0].Name != "1.json" || got[1].Name != "2.json" ||
+		!bytes.Equal(got[0].Body, one) || !bytes.Equal(got[1].Body, two) {
+		t.Fatalf("folder %q files %#v", gotFolder, got)
+	}
+	if calls.load != 1 || calls.ensure != 0 || calls.auth != 1 || calls.create != 0 || calls.require != 1 || calls.write != 1 {
+		t.Fatalf("calls %+v", calls)
+	}
+	disk, err := os.ReadFile(filepath.Join(dir, "tmp", "1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(disk, one) {
+		t.Fatalf("file changed %q", disk)
+	}
+}
+
+func TestUploadAcceptsOneFileAndJSONLiterals(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "object", body: "{}"},
+		{name: "array", body: "[]"},
+		{name: "null", body: "null"},
+		{name: "number", body: "1"},
+		{name: "string", body: `"a"`},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			path := tt.name + ".json"
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var calls callCount
+			cfg := &config.Config{Mode: "development", FilePath: "/tmp/.env.example", DriveFolderID: folderID}
+			base := calls.hooks(cfg, "", nil, nil)
+			var got docs.JSONFile
+			base.UploadJSON = func(_ context.Context, folder string, files []docs.JSONFile) ([]string, error) {
+				if folder != folderID || len(files) != 1 {
+					t.Fatalf("folder %q files %d", folder, len(files))
+				}
+				got = files[0]
+				return []string{"id-1"}, nil
+			}
+			var stdout, stderr bytes.Buffer
+			base.Stdout = &stdout
+			base.Stderr = &stderr
+			base.Environ = []string{"APP_ENV=development"}
+			base.Root = dir
+			code := run([]string{"upload", path}, base)
+			if code != 0 {
+				t.Fatalf("exit %d stderr %s", code, stderr.String())
+			}
+			if got.Name != path || string(got.Body) != tt.body {
+				t.Fatalf("file %#v", got)
+			}
+			want := path + "\nid-1\n" + docs.FileURL("id-1") + "\n"
+			if stdout.String() != want {
+				t.Fatalf("stdout %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestUploadKeepsJSONExtensionCase(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	body := []byte(`{"ok":true}`)
+	if err := os.WriteFile(filepath.Join(dir, "Note.JSON"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls callCount
+	cfg := &config.Config{Mode: "development", FilePath: "/tmp/.env.example", DriveFolderID: folderID}
+	base := calls.hooks(cfg, "", nil, nil)
+	var name string
+	base.UploadJSON = func(_ context.Context, _ string, files []docs.JSONFile) ([]string, error) {
+		name = files[0].Name
+		return []string{"id-json"}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"upload", "Note.JSON"}, base)
+	if code != 0 || name != "Note.JSON" {
+		t.Fatalf("exit %d name %q stderr %s", code, name, stderr.String())
+	}
+}
+
+func TestUploadPartialKeepsStdout(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(`{"n":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "2.json"), []byte(`{"n":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls callCount
+	cfg := &config.Config{Mode: "development", FilePath: "/tmp/.env.example", DriveFolderID: folderID}
+	base := calls.hooks(cfg, "", nil, nil)
+	base.UploadJSON = func(context.Context, string, []docs.JSONFile) ([]string, error) {
+		return []string{"id-one"}, errors.New("docs-cli: error: second failed")
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"upload", "1.json", "2.json"}, base)
+	if code != 1 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	want := "1.json\nid-one\n" + docs.FileURL("id-one") + "\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "docs-cli: uploaded 1.json bytes=7") || !strings.Contains(stderr.String(), "docs-cli: error: second failed") {
+		t.Fatalf("stderr %s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "docs-cli: uploaded 2.json") {
+		t.Fatalf("stderr %s", stderr.String())
+	}
+}
+
+func TestUploadFolderFlagOverridesEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(`{"n":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	flagFolder := "ZZ_folder_99"
+	original := readyEnv("https://drive.google.com/drive/folders/" + folderID)
+	path := filepath.Join(dir, ".env.example")
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var calls callCount
+	base := calls.hooks(nil, "", nil, nil)
+	base.Load = nil
+	var got string
+	base.UploadJSON = func(_ context.Context, folder string, _ []docs.JSONFile) ([]string, error) {
+		got = folder
+		return []string{"id-1"}, nil
+	}
+	base.Authorize = func(_ context.Context, _ *config.Config, opt oauth.Options) (*oauth2.Token, error) {
+		calls.auth++
+		if opt.Force {
+			t.Fatal("Force")
+		}
+		return &oauth2.Token{AccessToken: "access-token-value"}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"upload", "--folder", "  " + flagFolder + "  ", "1.json"}, base)
+	if code != 0 || got != flagFolder {
+		t.Fatalf("exit %d folder %q stderr %s", code, got, stderr.String())
+	}
+	file, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(file) != original {
+		t.Fatalf("env rewritten:\n%s", file)
+	}
+}
+
+func TestUploadEmptyFolderSkipsClient(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := strings.ReplaceAll(exampleEnv(), "you@gmail.com", "dev@example.com")
+	env = strings.ReplaceAll(env, "GOOGLE_OAUTH_CLIENT_ID=\n", "GOOGLE_OAUTH_CLIENT_ID=abc.apps.googleusercontent.com\n")
+	env = strings.ReplaceAll(env, "GOOGLE_OAUTH_CLIENT_SECRET=\n", "GOOGLE_OAUTH_CLIENT_SECRET="+secretValue+"\n")
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(env), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var calls callCount
+	base := calls.hooks(nil, "", nil, nil)
+	base.Load = nil
+	base.RequireClient = func(*config.Config) error {
+		calls.require++
+		return nil
+	}
+	base.WriteCredentials = func(*config.Config) error {
+		calls.write++
+		return nil
+	}
+	base.Authorize = func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error) {
+		calls.auth++
+		return nil, nil
+	}
+	base.UploadJSON = func(context.Context, string, []docs.JSONFile) ([]string, error) {
+		t.Fatal("upload called")
+		return nil, nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"upload", "1.json"}, base)
+	if code != 1 || !strings.Contains(stderr.String(), "docs-cli: GOOGLE_DRIVE_FOLDER_ID is required") {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 || calls.require != 0 || calls.write != 0 || calls.auth != 0 {
+		t.Fatalf("stdout %q calls %+v", stdout.String(), calls)
+	}
+}
+
+func TestUploadSameBaseName(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll(filepath.Join(dir, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a", "1.json"), []byte(`{"side":"a"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b", "1.json"), []byte(`{"side":"b"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls callCount
+	cfg := &config.Config{Mode: "development", FilePath: "/tmp/.env.example", DriveFolderID: folderID}
+	base := calls.hooks(cfg, "", nil, nil)
+	var names []string
+	base.UploadJSON = func(_ context.Context, _ string, files []docs.JSONFile) ([]string, error) {
+		for _, file := range files {
+			names = append(names, file.Name)
+		}
+		return []string{"id-a", "id-b"}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"upload", "a/1.json", "b/1.json"}, base)
+	if code != 0 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	if len(names) != 2 || names[0] != "1.json" || names[1] != "1.json" {
+		t.Fatalf("names %#v", names)
+	}
+	if !strings.Contains(stdout.String(), "a/1.json\nid-a\n") || !strings.Contains(stdout.String(), "b/1.json\nid-b\n") {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+}
+
 type fakeTTY struct {
 	terminal bool
 	secrets  []string

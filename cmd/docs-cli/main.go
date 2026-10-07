@@ -36,6 +36,7 @@ commands:
   gemini-key
   analyze --json PATH
   draft --json PATH --template PATH
+  upload [--folder FOLDER] PATH [PATH ...]
 
 create:
   --title TITLE    document title; omitted means DOCS_DEFAULT_TITLE
@@ -56,6 +57,10 @@ analyze:
 draft:
   --json PATH      section JSON from parse
   --template PATH  cover-letter template PDF
+
+upload:
+  PATH             one or more .json files
+  --folder FOLDER  Drive folder id or folder URL for this run; overrides GOOGLE_DRIVE_FOLDER_ID
 
 Run from the repository root, the directory that contains .env.example.
 The release binary defaults to production. APP_ENV in the environment overrides it.
@@ -107,6 +112,7 @@ type deps struct {
 	WriteCredentials    func(*config.Config) error
 	Authorize           func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error)
 	CreateDocument      func(ctx context.Context, title, body, folderID string, insertIndex int64) (string, error)
+	UploadJSON          func(ctx context.Context, folderID string, files []docs.JSONFile) ([]string, error)
 	// GeminiClient is the HTTP client for section mapping, autoparse, and analyze
 	// when fm fails. Nil uses the default client. Tests pass a client that does not call Gemini.
 	GeminiClient *http.Client
@@ -143,6 +149,8 @@ func run(args []string, d deps) int {
 		return runAnalyze(args[1:], d)
 	case "draft":
 		return runDraft(args[1:], d)
+	case "upload":
+		return runUpload(args[1:], d)
 	default:
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
@@ -244,6 +252,121 @@ func runCreate(args []string, d deps) int {
 	fmt.Fprintf(d.Stderr, "docs-cli: created document %s\n", id)
 	fmt.Fprintf(d.Stdout, "%s\n%s\n", id, docs.EditURL(id))
 	return 0
+}
+
+func runUpload(args []string, d deps) int {
+	fs := newFlagSet("upload", d.Stderr)
+	folderFlag := fs.String("folder", "", "Drive folder id or folder URL for this run; overrides GOOGLE_DRIVE_FOLDER_ID")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	paths := fs.Args()
+	for _, path := range paths {
+		if !strings.EqualFold(filepath.Ext(path), ".json") {
+			fmt.Fprintf(d.Stderr, "docs-cli: not a json file: %s\n", path)
+			return 1
+		}
+	}
+	folderSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "folder" {
+			folderSet = true
+		}
+	})
+	var folderFromFlag string
+	if folderSet {
+		id, err := config.NormalizeFolderID(*folderFlag)
+		if err != nil {
+			fmt.Fprintln(d.Stderr, err.Error())
+			return 1
+		}
+		folderFromFlag = id
+	}
+	files := make([]docs.JSONFile, len(paths))
+	for i, path := range paths {
+		body, err := readUploadJSON(path)
+		if err != nil {
+			fmt.Fprintln(d.Stderr, err.Error())
+			return 1
+		}
+		files[i] = docs.JSONFile{Name: filepath.Base(path), Body: body}
+	}
+
+	root, err := commandRoot(d)
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	cfg, ok := loadConfigured(d, root)
+	if !ok {
+		return 1
+	}
+	folderID := folderFromFlag
+	if !folderSet {
+		if cfg.DriveFolderID == "" {
+			fmt.Fprintln(d.Stderr, errNeedFolder)
+			return 1
+		}
+		folderID = cfg.DriveFolderID
+	}
+	if err := d.requireClient(cfg); err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	if err := d.writeCredentials(cfg); err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	fmt.Fprintln(d.Stderr, "docs-cli: wrote credentials.json")
+	tok, err := d.authorize(context.Background(), cfg, oauth.Options{Force: false, Stderr: d.Stderr})
+	if err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	ids, warn, err := d.uploadJSON(context.Background(), cfg, tok, folderID, files)
+	for i, id := range ids {
+		fmt.Fprintf(d.Stderr, "docs-cli: uploaded %s bytes=%d\n", paths[i], len(files[i].Body))
+		fmt.Fprintf(d.Stdout, "%s\n%s\n%s\n", paths[i], id, docs.FileURL(id))
+	}
+	if err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		if warn {
+			fmt.Fprintln(d.Stderr, errKeyringWarn)
+		}
+		return 1
+	}
+	if warn {
+		fmt.Fprintln(d.Stderr, errKeyringWarn)
+	}
+	return 0
+}
+
+func readUploadJSON(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("docs-cli: error: %s", err.Error())
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("docs-cli: not a regular file: %s", path)
+	}
+	if info.Size() > maxJSONBytes {
+		return nil, fmt.Errorf("docs-cli: json exceeds 1 MiB: %s", path)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("docs-cli: error: %s", err.Error())
+	}
+	if len(body) > maxJSONBytes {
+		return nil, fmt.Errorf("docs-cli: json exceeds 1 MiB: %s", path)
+	}
+	if !json.Valid(body) {
+		return nil, fmt.Errorf("docs-cli: json is not valid: %s", path)
+	}
+	return body, nil
 }
 
 func readCreateBody(d deps, textSet bool, text string) (string, int) {
@@ -452,6 +575,30 @@ func (d deps) createDocument(ctx context.Context, cfg *config.Config, tok *oauth
 		warn = true
 	}
 	return id, warn, err
+}
+
+func (d deps) uploadJSON(ctx context.Context, cfg *config.Config, tok *oauth2.Token, folderID string, files []docs.JSONFile) ([]string, bool, error) {
+	if d.UploadJSON != nil {
+		ids, err := d.UploadJSON(ctx, folderID, files)
+		return ids, false, err
+	}
+	if tok == nil {
+		return nil, false, errors.New("docs-cli: error: missing token")
+	}
+	src := oauth.TokenSource(ctx, cfg, tok)
+	if _, err := src.Token(); err != nil {
+		return nil, false, oauth.UserTokenError(err, cfg.ClientSecret, tok.RefreshToken, tok.AccessToken)
+	}
+	driveSvc, err := docs.NewDriveService(ctx, src)
+	if err != nil {
+		return nil, false, fmt.Errorf("docs-cli: error: %s", err.Error())
+	}
+	ids, err := docs.UploadJSON(ctx, driveSvc, folderID, files)
+	warn := false
+	if rotErr := oauth.SyncRefreshToken(cfg, src); rotErr != nil {
+		warn = true
+	}
+	return ids, warn, err
 }
 
 func runParse(args []string, d deps) int {
