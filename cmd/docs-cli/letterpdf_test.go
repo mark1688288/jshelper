@@ -24,7 +24,7 @@ func TestLetterPDFSample(t *testing.T) {
 	if !bytes.Contains(body, []byte("/MediaBox [0 0 595.28 841.89]")) {
 		t.Fatal("media box")
 	}
-	want := []byte("(Dear team,) Tj\nT*\nT*\n(I write to apply.) Tj\n")
+	want := []byte("(Dear team,) Tj\n0 -20 Td\n0 -20 Td\n(I write to apply.) Tj\n")
 	if !bytes.Contains(body, want) {
 		t.Fatalf("stream missing %q", want)
 	}
@@ -58,19 +58,19 @@ func TestLetterPDFEscapesParentheses(t *testing.T) {
 }
 
 func TestLetterPDFPages(t *testing.T) {
-	one, err := buildLetterPDF(strings.Repeat("Hi.\n", 43))
+	one, err := buildLetterPDF(strings.Repeat("Hi.\n", 35))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pdfPageCount(t, one) != 1 {
-		t.Fatal("43 lines")
+		t.Fatal("35 lines")
 	}
-	two, err := buildLetterPDF(strings.Repeat("Hi.\n", 44))
+	two, err := buildLetterPDF(strings.Repeat("Hi.\n", 36))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pdfPageCount(t, two) != 2 {
-		t.Fatal("44 lines")
+		t.Fatal("36 lines")
 	}
 	fifty, err := buildLetterPDF(strings.Repeat("Hi.\n", 50))
 	if err != nil {
@@ -97,15 +97,15 @@ func TestLetterPDFNewlines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(trailing, []byte("T*")) || !bytes.Contains(trailing, []byte("(Hi) Tj\n")) {
+	if bytes.Contains(trailing, []byte("0 -")) || !bytes.Contains(trailing, []byte("(Hi) Tj\n")) {
 		t.Fatal("trailing newline became a blank line")
 	}
 	blank, err := buildLetterPDF("Hi\n\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Count(blank, []byte("T*")) != 1 {
-		t.Fatalf("blank lines %d", bytes.Count(blank, []byte("T*")))
+	if bytes.Count(blank, []byte("0 -20 Td\n")) != 1 {
+		t.Fatalf("blank lines %d", bytes.Count(blank, []byte("0 -20 Td\n")))
 	}
 }
 
@@ -166,9 +166,20 @@ func TestLetterPDFWrap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []byte("(" + strings.Repeat("W", 43) + ") Tj\nT*\n(tail) Tj\n")
+	want := []byte("(" + strings.Repeat("W", 43) + ") Tj\n0 -16 Td\n(tail) Tj\n")
 	if !bytes.Contains(body, want) {
 		t.Fatalf("space split missing %q", want)
+	}
+}
+
+func TestLetterPDFSourceBreakAndWrap(t *testing.T) {
+	body, err := buildLetterPDF("Subject: Role\nDear team,\n" + strings.Repeat("W", 43) + " tail\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("(Subject: Role) Tj\n0 -20 Td\n(Dear team,) Tj\n0 -20 Td\n(" + strings.Repeat("W", 43) + ") Tj\n0 -16 Td\n(tail) Tj\n")
+	if !bytes.Contains(body, want) {
+		t.Fatalf("stream missing source break\n%s", body)
 	}
 }
 

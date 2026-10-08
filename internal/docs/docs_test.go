@@ -443,6 +443,201 @@ func TestUploadParentMismatch(t *testing.T) {
 	}
 }
 
+func TestImportPDFMultipart(t *testing.T) {
+	const title = "MY Cover Letter"
+	pdf := []byte("%PDF-1.4\nSENTINEL-PDF\n")
+	rec := &recorder{
+		getBody: folderJSON(testFolderID, DriveFolderMime, false),
+		uploads: []uploadReply{{body: importedFileJSON(testDocID, testFolderID, GoogleDocMime)}},
+	}
+	driveSvc, _ := newServices(t, rec)
+	id, err := ImportPDF(context.Background(), driveSvc, title, testFolderID, pdf)
+	if err != nil || id != testDocID {
+		t.Fatalf("id %q err %v", id, err)
+	}
+	var gets, creates int
+	for _, call := range rec.snapshot() {
+		if deadlineBad(call.remain) {
+			t.Fatalf("deadline remain %s for %s", call.remain, call.path)
+		}
+		switch {
+		case call.method == http.MethodGet && call.path == "/files/"+testFolderID:
+			gets++
+			if call.query("supportsAllDrives") != "true" || call.query("fields") != "id,mimeType,name,trashed" {
+				t.Fatalf("get query %s", call.rawQuery)
+			}
+		case call.method == http.MethodPost && call.path == "/upload/drive/v3/files":
+			creates++
+			if call.query("uploadType") != "multipart" || call.query("supportsAllDrives") != "true" || call.query("fields") != "id,parents,mimeType" {
+				t.Fatalf("upload query %s", call.rawQuery)
+			}
+			assertImportPDF(t, call, title, testFolderID, pdf)
+		default:
+			t.Fatalf("unexpected %s %s", call.method, call.path)
+		}
+	}
+	if gets != 1 || creates != 1 {
+		t.Fatalf("gets %d creates %d", gets, creates)
+	}
+	if rec.count(http.MethodPost, "/files") != 0 {
+		t.Fatal("metadata-only files.create")
+	}
+}
+
+func TestImportFolderDeniedDoesNotCreate(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			rec := &recorder{getStatus: status, getBody: `{"error":{"code":` + fmt.Sprint(status) + `,"message":"nope"}}`}
+			driveSvc, _ := newServices(t, rec)
+			_, err := ImportPDF(context.Background(), driveSvc, "Demo", testFolderID, []byte("%PDF-1.4\n"))
+			want := "docs-cli: folder not found or not accessible: " + testFolderID
+			if err == nil || err.Error() != want {
+				t.Fatalf("err %v", err)
+			}
+			if rec.count(http.MethodPost, "/upload/drive/v3/files") != 0 || rec.count(http.MethodPost, "/files") != 0 {
+				t.Fatal("created a file")
+			}
+		})
+	}
+}
+
+func TestImportFolderMimeAndTrash(t *testing.T) {
+	rec := &recorder{getBody: folderJSON(testFolderID, GoogleDocMime, false)}
+	driveSvc, _ := newServices(t, rec)
+	_, err := ImportPDF(context.Background(), driveSvc, "Demo", testFolderID, []byte("%PDF-1.4\n"))
+	want := "docs-cli: GOOGLE_DRIVE_FOLDER_ID is not a folder: " + testFolderID
+	if err == nil || err.Error() != want || rec.count(http.MethodPost, "/upload/drive/v3/files") != 0 {
+		t.Fatalf("err %v", err)
+	}
+	rec.reset()
+	rec.getBody = folderJSON(testFolderID, DriveFolderMime, true)
+	_, err = ImportPDF(context.Background(), driveSvc, "Demo", testFolderID, []byte("%PDF-1.4\n"))
+	want = "docs-cli: folder is in the trash: " + testFolderID
+	if err == nil || err.Error() != want || rec.count(http.MethodPost, "/upload/drive/v3/files") != 0 {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestImportWrongMIME(t *testing.T) {
+	rec := &recorder{
+		getBody: folderJSON(testFolderID, DriveFolderMime, false),
+		uploads: []uploadReply{{body: importedFileJSON(testDocID, testFolderID, PDFMime)}},
+	}
+	driveSvc, _ := newServices(t, rec)
+	_, err := ImportPDF(context.Background(), driveSvc, "Demo", testFolderID, []byte("%PDF-1.4\n"))
+	want := "docs-cli: import did not create a Google Doc: " + testDocID
+	if err == nil || err.Error() != want {
+		t.Fatalf("err %v", err)
+	}
+	for _, call := range rec.snapshot() {
+		if call.method == http.MethodDelete {
+			t.Fatal("deleted the drive file")
+		}
+	}
+	if rec.count(http.MethodPost, "/upload/drive/v3/files") != 1 {
+		t.Fatal("files.create count")
+	}
+}
+
+func TestImportParentMismatch(t *testing.T) {
+	rec := &recorder{
+		getBody: folderJSON(testFolderID, DriveFolderMime, false),
+		uploads: []uploadReply{{body: importedFileJSON(testDocID, "otherFolder1", GoogleDocMime)}},
+	}
+	driveSvc, _ := newServices(t, rec)
+	_, err := ImportPDF(context.Background(), driveSvc, "Demo", testFolderID, []byte("%PDF-1.4\n"))
+	want := "docs-cli: document parent is not the requested folder: " + testFolderID
+	if err == nil || err.Error() != want {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestImportEmptyID(t *testing.T) {
+	rec := &recorder{
+		getBody: folderJSON(testFolderID, DriveFolderMime, false),
+		uploads: []uploadReply{{body: importedFileJSON("", testFolderID, GoogleDocMime)}},
+	}
+	driveSvc, _ := newServices(t, rec)
+	_, err := ImportPDF(context.Background(), driveSvc, "Demo", testFolderID, []byte("%PDF-1.4\n"))
+	if err == nil || err.Error() != "docs-cli: error: files.create returned an empty id" {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestImportRejectsBeforeHTTP(t *testing.T) {
+	rec := &recorder{}
+	driveSvc, _ := newServices(t, rec)
+	_, err := ImportPDF(context.Background(), driveSvc, "Demo", "", []byte("%PDF-1.4\n"))
+	if err == nil || !strings.Contains(err.Error(), "GOOGLE_DRIVE_FOLDER_ID is required") || len(rec.snapshot()) != 0 {
+		t.Fatalf("err %v calls %d", err, len(rec.snapshot()))
+	}
+	_, err = ImportPDF(context.Background(), nil, "Demo", testFolderID, []byte("%PDF-1.4\n"))
+	if err == nil || err.Error() != "docs-cli: error: missing Google service" {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestImportDrive400(t *testing.T) {
+	rec := &recorder{
+		getBody: folderJSON(testFolderID, DriveFolderMime, false),
+		uploads: []uploadReply{{status: http.StatusBadRequest, body: `{"error":{"code":400,"message":"Bad Request"}}`}},
+	}
+	driveSvc, _ := newServices(t, rec)
+	_, err := ImportPDF(context.Background(), driveSvc, "Demo", testFolderID, []byte("%PDF-1.4\n"))
+	if err == nil || !strings.Contains(err.Error(), "docs-cli: error:") || !strings.Contains(err.Error(), "400") || strings.Contains(err.Error(), "OCR") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func importedFileJSON(id, parent, mime string) string {
+	return fmt.Sprintf(`{"id":%q,"parents":[%q],"mimeType":%q}`, id, parent, mime)
+}
+
+func assertImportPDF(t *testing.T, call apiCall, title, folderID string, payload []byte) {
+	t.Helper()
+	mediaType, params, err := mime.ParseMediaType(call.contentType)
+	if err != nil || mediaType != "multipart/related" || params["boundary"] == "" {
+		t.Fatalf("content type %q err %v", call.contentType, err)
+	}
+	parts := multipart.NewReader(bytes.NewReader(call.body), params["boundary"])
+	metaPart, err := parts.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metaRaw, err := io.ReadAll(metaPart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta struct {
+		Name     string   `json:"name"`
+		MimeType string   `json:"mimeType"`
+		Parents  []string `json:"parents"`
+	}
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		t.Fatalf("meta %s: %v", metaRaw, err)
+	}
+	if meta.Name != title || meta.MimeType != GoogleDocMime || len(meta.Parents) != 1 || meta.Parents[0] != folderID {
+		t.Fatalf("meta %s", metaRaw)
+	}
+	mediaPart, err := parts.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mediaPart.Header.Get("Content-Type"); got != PDFMime {
+		t.Fatalf("media type %q", got)
+	}
+	media, err := io.ReadAll(mediaPart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(media, payload) {
+		t.Fatalf("media %q", media)
+	}
+	if _, err := parts.NextPart(); err != io.EOF {
+		t.Fatalf("extra part %v", err)
+	}
+}
+
 func assertMultipartUpload(t *testing.T, call apiCall, name, folderID string, payload []byte) {
 	t.Helper()
 	mediaType, params, err := mime.ParseMediaType(call.contentType)

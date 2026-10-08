@@ -1,4 +1,4 @@
-// Package docs creates one Google Doc in a Drive folder and uploads JSON files there.
+// Package docs creates one Google Doc in a Drive folder, imports a PDF as a Google Doc, and uploads JSON files there.
 package docs
 
 import (
@@ -23,6 +23,7 @@ const (
 	GoogleDocMime   = "application/vnd.google-apps.document"
 	DriveFolderMime = "application/vnd.google-apps.folder"
 	JSONMime        = "application/json"
+	PDFMime         = "application/pdf"
 )
 
 // rpcTimeout is the deadline for one Drive or Docs RPC.
@@ -118,6 +119,43 @@ func CreateDocument(ctx context.Context, driveSvc *drive.Service, docsSvc *docsa
 	cancelUpdate()
 	if err != nil {
 		return created.Id, fmt.Errorf("docs-cli: insertText failed; document was created: %s", created.Id)
+	}
+	return created.Id, nil
+}
+
+// ImportPDF converts pdf into one Google Doc named title in folderID.
+// The media is the original PDF. A same title creates another document.
+func ImportPDF(ctx context.Context, driveSvc *drive.Service, title, folderID string, pdf []byte) (string, error) {
+	if folderID == "" {
+		return "", errFolderNeeded
+	}
+	if driveSvc == nil {
+		return "", errors.New("docs-cli: error: missing Google service")
+	}
+	if err := requireFolder(ctx, driveSvc, folderID); err != nil {
+		return "", err
+	}
+	createCtx, cancelCreate := rpcContext(ctx)
+	created, err := driveSvc.Files.Create(&drive.File{
+		Name:     title,
+		MimeType: GoogleDocMime,
+		Parents:  []string{folderID},
+	}).Media(bytes.NewReader(pdf), googleapi.ContentType(PDFMime)).
+		SupportsAllDrives(true).
+		Fields("id,parents,mimeType").
+		Context(createCtx).Do()
+	cancelCreate()
+	if err != nil {
+		return "", fmt.Errorf("docs-cli: error: %s", publicErr(err))
+	}
+	if created == nil || created.Id == "" {
+		return "", errors.New("docs-cli: error: files.create returned an empty id")
+	}
+	if created.MimeType != GoogleDocMime {
+		return "", fmt.Errorf("docs-cli: import did not create a Google Doc: %s", created.Id)
+	}
+	if !hasParent(created.Parents, folderID) {
+		return "", fmt.Errorf("docs-cli: document parent is not the requested folder: %s", folderID)
 	}
 	return created.Id, nil
 }
