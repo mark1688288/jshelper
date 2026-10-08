@@ -28,7 +28,7 @@ import (
 const usageText = `usage: docs-cli <command> [flags]
 
 commands:
-  create [--title TITLE] [--text TEXT] [--folder FOLDER]
+  create [--title TITLE] [--text TEXT] [--folder FOLDER] [--import PATH]
   auth
   setup
   parse --html PATH [--autoparse]
@@ -43,6 +43,7 @@ create:
   --text TEXT      document body; if omitted, read stdin when it is not a terminal;
                    if omitted and stdin is a terminal, the body is empty
   --folder FOLDER  Drive folder id or folder URL for this run; overrides GOOGLE_DRIVE_FOLDER_ID
+  --import PATH    PDF to convert into the Google Doc; omit to use --text or stdin
 
 parse:
   --html PATH      saved job HTML file
@@ -114,6 +115,7 @@ type deps struct {
 	WriteCredentials    func(*config.Config) error
 	Authorize           func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error)
 	CreateDocument      func(ctx context.Context, title, body, folderID string, insertIndex int64) (string, error)
+	ImportPDF           func(ctx context.Context, title, folderID string, pdf []byte) (string, error)
 	UploadJSON          func(ctx context.Context, folderID string, files []docs.JSONFile) ([]string, error)
 	// GeminiClient is the HTTP client for section mapping, autoparse, and analyze
 	// when fm fails. Nil uses the default client. Tests pass a client that does not call Gemini.
@@ -164,6 +166,7 @@ func runCreate(args []string, d deps) int {
 	titleFlag := fs.String("title", "", "document title; omitted means DOCS_DEFAULT_TITLE")
 	textFlag := fs.String("text", "", "document body; if omitted, read stdin when it is not a terminal")
 	folderFlag := fs.String("folder", "", "Drive folder id or folder URL for this run; overrides GOOGLE_DRIVE_FOLDER_ID")
+	importFlag := fs.String("import", "", "PDF to convert into the Google Doc; omit to use --text or stdin")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -171,7 +174,7 @@ func runCreate(args []string, d deps) int {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
 	}
-	titleSet, textSet, folderSet := false, false, false
+	titleSet, textSet, folderSet, importSet := false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "title":
@@ -180,8 +183,13 @@ func runCreate(args []string, d deps) int {
 			textSet = true
 		case "folder":
 			folderSet = true
+		case "import":
+			importSet = true
 		}
 	})
+	if importSet {
+		return runCreateImport(d, titleSet, textSet, folderSet, *titleFlag, *folderFlag, *importFlag)
+	}
 
 	body, code := readCreateBody(d, textSet, *textFlag)
 	if code != 0 {
@@ -254,6 +262,113 @@ func runCreate(args []string, d deps) int {
 	fmt.Fprintf(d.Stderr, "docs-cli: created document %s\n", id)
 	fmt.Fprintf(d.Stdout, "%s\n%s\n", id, docs.EditURL(id))
 	return 0
+}
+
+func runCreateImport(d deps, titleSet, textSet, folderSet bool, titleFlag, folderFlag, path string) int {
+	if path == "" || textSet {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	if !strings.EqualFold(filepath.Ext(path), ".pdf") {
+		fmt.Fprintf(d.Stderr, "docs-cli: not a pdf file: %s\n", path)
+		return 1
+	}
+	var title string
+	if titleSet {
+		title = strings.TrimSpace(titleFlag)
+		if title == "" {
+			fmt.Fprintln(d.Stderr, errTitleEmpty)
+			return 1
+		}
+	}
+	var folderFromFlag string
+	if folderSet {
+		id, err := config.NormalizeFolderID(folderFlag)
+		if err != nil {
+			fmt.Fprintln(d.Stderr, err.Error())
+			return 1
+		}
+		folderFromFlag = id
+	}
+	pdf, err := readImportPDF(path)
+	if err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+
+	root, err := commandRoot(d)
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	cfg, ok := loadConfigured(d, root)
+	if !ok {
+		return 1
+	}
+	folderID := folderFromFlag
+	if !folderSet {
+		if cfg.DriveFolderID == "" {
+			fmt.Fprintln(d.Stderr, errNeedFolder)
+			return 1
+		}
+		folderID = cfg.DriveFolderID
+	}
+	if !titleSet {
+		title = cfg.DefaultTitle
+	}
+	if err := d.requireClient(cfg); err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	if err := d.writeCredentials(cfg); err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	fmt.Fprintln(d.Stderr, "docs-cli: wrote credentials.json")
+	tok, err := d.authorize(context.Background(), cfg, oauth.Options{Force: false, Stderr: d.Stderr})
+	if err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	id, warn, err := d.importPDF(context.Background(), cfg, tok, title, folderID, pdf)
+	if err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		if warn {
+			fmt.Fprintln(d.Stderr, errKeyringWarn)
+		}
+		return 1
+	}
+	if warn {
+		fmt.Fprintln(d.Stderr, errKeyringWarn)
+	}
+	fmt.Fprintf(d.Stderr, "docs-cli: imported %s bytes=%d\n", path, len(pdf))
+	fmt.Fprintf(d.Stderr, "docs-cli: created document %s\n", id)
+	fmt.Fprintf(d.Stdout, "%s\n%s\n", id, docs.EditURL(id))
+	return 0
+}
+
+func readImportPDF(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("docs-cli: error: %s", err.Error())
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("docs-cli: not a regular file: %s", path)
+	}
+	if info.Size() > docs.MaxBodyBytes {
+		return nil, fmt.Errorf("docs-cli: pdf exceeds 1 MiB: %s", path)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("docs-cli: error: %s", err.Error())
+	}
+	if len(body) > docs.MaxBodyBytes {
+		return nil, fmt.Errorf("docs-cli: pdf exceeds 1 MiB: %s", path)
+	}
+	if !bytes.HasPrefix(body, []byte("%PDF-")) {
+		return nil, fmt.Errorf("docs-cli: pdf is not valid: %s", path)
+	}
+	return body, nil
 }
 
 func runUpload(args []string, d deps) int {
@@ -572,6 +687,30 @@ func (d deps) createDocument(ctx context.Context, cfg *config.Config, tok *oauth
 		return "", false, fmt.Errorf("docs-cli: error: %s", err.Error())
 	}
 	id, err := docs.CreateDocument(ctx, driveSvc, docsSvc, title, body, folderID, cfg.InsertIndex)
+	warn := false
+	if rotErr := oauth.SyncRefreshToken(cfg, src); rotErr != nil {
+		warn = true
+	}
+	return id, warn, err
+}
+
+func (d deps) importPDF(ctx context.Context, cfg *config.Config, tok *oauth2.Token, title, folderID string, pdf []byte) (string, bool, error) {
+	if d.ImportPDF != nil {
+		id, err := d.ImportPDF(ctx, title, folderID, pdf)
+		return id, false, err
+	}
+	if tok == nil {
+		return "", false, errors.New("docs-cli: error: missing token")
+	}
+	src := oauth.TokenSource(ctx, cfg, tok)
+	if _, err := src.Token(); err != nil {
+		return "", false, oauth.UserTokenError(err, cfg.ClientSecret, tok.RefreshToken, tok.AccessToken)
+	}
+	driveSvc, err := docs.NewDriveService(ctx, src)
+	if err != nil {
+		return "", false, fmt.Errorf("docs-cli: error: %s", err.Error())
+	}
+	id, err := docs.ImportPDF(ctx, driveSvc, title, folderID, pdf)
 	warn := false
 	if rotErr := oauth.SyncRefreshToken(cfg, src); rotErr != nil {
 		warn = true

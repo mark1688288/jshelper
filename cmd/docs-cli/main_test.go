@@ -82,6 +82,7 @@ func TestRun(t *testing.T) {
 		{name: "missing title", args: []string{"create", "--title"}, code: 2, stderr: "usage: docs-cli"},
 		{name: "missing text", args: []string{"create", "--text"}, code: 2, stderr: "usage: docs-cli"},
 		{name: "missing folder", args: []string{"create", "--folder"}, code: 2, stderr: "usage: docs-cli"},
+		{name: "missing import", args: []string{"create", "--import"}, code: 2, stderr: "usage: docs-cli"},
 		{name: "extra create arg", args: []string{"create", "extra"}, code: 2, stderr: "usage: docs-cli"},
 		{name: "extra arg after flags", args: []string{"create", "--title", "Demo", "extra"}, code: 2, stderr: "usage: docs-cli"},
 		{name: "extra auth arg", args: []string{"auth", "extra"}, code: 2, stderr: "usage: docs-cli"},
@@ -902,6 +903,10 @@ func TestCreateSuccessStdout(t *testing.T) {
 	base := calls.hooks(nil, docID, nil, func(title, body, folder string, _ int64) {
 		gotTitle, gotBody, gotFolder = title, body, folder
 	})
+	base.ImportPDF = func(context.Context, string, string, []byte) (string, error) {
+		t.Fatal("ImportPDF")
+		return "", nil
+	}
 	base.Load = nil
 	base.WriteCredentials = nil
 	base.RequireClient = nil
@@ -1043,6 +1048,453 @@ func TestCreateExactCapReachesCreate(t *testing.T) {
 	code := run([]string{"create", "--title", "Demo", "--text", body}, base)
 	if code != 0 || got != docs.MaxBodyBytes || calls.create != 1 {
 		t.Fatalf("exit %d len %d calls %+v stderr %s", code, got, calls, stderr.String())
+	}
+}
+
+func TestCreateImportUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "empty import", args: []string{"create", "--import", ""}},
+		{name: "empty import and text", args: []string{"create", "--import", "", "--text", "hello"}},
+		{name: "import and text", args: []string{"create", "--import", "missing.pdf", "--text", "hello"}},
+		{name: "import and empty text", args: []string{"create", "--import", "missing.pdf", "--text", ""}},
+		{name: "extra arg", args: []string{"create", "--import", "missing.pdf", "extra"}},
+		{name: "txt extra arg", args: []string{"create", "--import", "notes.txt", "extra"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls callCount
+			base := calls.hooks(&config.Config{DriveFolderID: folderID, DefaultTitle: "Untitled", InsertIndex: 1}, "doc", nil, nil)
+			base.CreateDocument = func(context.Context, string, string, string, int64) (string, error) {
+				t.Fatal("CreateDocument")
+				return "", nil
+			}
+			base.ImportPDF = func(context.Context, string, string, []byte) (string, error) {
+				t.Fatal("ImportPDF")
+				return "", nil
+			}
+			var stdout, stderr bytes.Buffer
+			base.Stdin = failReader{t: t}
+			base.Stdout = &stdout
+			base.Stderr = &stderr
+			base.Environ = []string{"APP_ENV=development"}
+			base.Root = t.TempDir()
+			code := run(tt.args, base)
+			if code != 2 || stdout.Len() != 0 || stderr.String() != usageText {
+				t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+			}
+			if calls.load != 0 || calls.ensure != 0 || calls.require != 0 || calls.write != 0 || calls.auth != 0 || calls.create != 0 {
+				t.Fatalf("calls %+v", calls)
+			}
+		})
+	}
+	if !strings.Contains(usageText, "\n  create [--title TITLE] [--text TEXT] [--folder FOLDER] [--import PATH]\n") {
+		t.Fatalf("usage commands:\n%s", usageText)
+	}
+	if !strings.Contains(usageText, "\n  --import PATH    PDF to convert into the Google Doc; omit to use --text or stdin\n") {
+		t.Fatalf("usage import flag:\n%s", usageText)
+	}
+}
+
+func TestCreateImportRejectsBeforeAuth(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "bad.pdf"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "empty.pdf"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "lower.pdf"), []byte("%pdf-1.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.pdf"), bytes.Repeat([]byte("a"), docs.MaxBodyBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "dir.pdf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "realdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "realdir"), filepath.Join(dir, "dirlink.pdf")); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		args   []string
+		want   string
+		substr bool
+	}{
+		{name: "txt", args: []string{"create", "--import", "notes.txt"}, want: "docs-cli: not a pdf file: notes.txt"},
+		{name: "bak", args: []string{"create", "--import", "letter.pdf.bak"}, want: "docs-cli: not a pdf file: letter.pdf.bak"},
+		{name: "no extension", args: []string{"create", "--import", "readme"}, want: "docs-cli: not a pdf file: readme"},
+		{name: "txt before title", args: []string{"create", "--import", "notes.txt", "--title", ""}, want: "docs-cli: not a pdf file: notes.txt"},
+		{name: "spaced txt", args: []string{"create", "--import", " notes.txt"}, want: "docs-cli: not a pdf file:  notes.txt"},
+		{name: "empty title", args: []string{"create", "--import", "missing.pdf", "--title", "   "}, want: "docs-cli: title must not be empty"},
+		{name: "bad folder", args: []string{"create", "--import", "missing.pdf", "--folder", "abc"}, want: "docs-cli: GOOGLE_DRIVE_FOLDER_ID is not a Drive folder URL or id"},
+		{name: "too big", args: []string{"create", "--import", "big.pdf"}, want: "docs-cli: pdf exceeds 1 MiB: big.pdf"},
+		{name: "directory", args: []string{"create", "--import", "dir.pdf"}, want: "docs-cli: not a regular file: dir.pdf"},
+		{name: "directory symlink", args: []string{"create", "--import", "dirlink.pdf"}, want: "docs-cli: not a regular file: dirlink.pdf"},
+		{name: "not pdf", args: []string{"create", "--import", "bad.pdf"}, want: "docs-cli: pdf is not valid: bad.pdf"},
+		{name: "empty file", args: []string{"create", "--import", "empty.pdf"}, want: "docs-cli: pdf is not valid: empty.pdf"},
+		{name: "lower header", args: []string{"create", "--import", "lower.pdf"}, want: "docs-cli: pdf is not valid: lower.pdf"},
+		{name: "missing", args: []string{"create", "--import", "missing.pdf"}, want: "docs-cli: error: stat missing.pdf: no such file or directory"},
+		{name: "untrimmed path", args: []string{"create", "--import", " missing.pdf"}, want: "docs-cli: error: stat  missing.pdf: no such file or directory", substr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls callCount
+			base := calls.hooks(&config.Config{DriveFolderID: folderID, DefaultTitle: "Untitled", InsertIndex: 1}, "", nil, nil)
+			base.CreateDocument = func(context.Context, string, string, string, int64) (string, error) {
+				t.Fatal("CreateDocument")
+				return "", nil
+			}
+			base.ImportPDF = func(context.Context, string, string, []byte) (string, error) {
+				t.Fatal("ImportPDF")
+				return "", nil
+			}
+			var stdout, stderr bytes.Buffer
+			base.Stdin = failReader{t: t}
+			base.Stdout = &stdout
+			base.Stderr = &stderr
+			base.Environ = []string{"APP_ENV=production"}
+			base.Root = dir
+			code := run(tt.args, base)
+			got := stderr.String()
+			match := got == tt.want+"\n"
+			if tt.substr {
+				match = strings.Contains(got, tt.want)
+			}
+			if code != 1 || !match || stdout.Len() != 0 {
+				t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), got)
+			}
+			if calls.load != 0 || calls.ensure != 0 || calls.require != 0 || calls.write != 0 || calls.auth != 0 || calls.create != 0 {
+				t.Fatalf("calls %+v", calls)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "credentials.json")); !os.IsNotExist(err) {
+				t.Fatalf("credentials: %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateImportSuccess(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	const (
+		docID   = "doc1234567890"
+		relPath = "customname.pdf"
+		payload = "%PDF-1.4\nSENTINEL-PDF\n"
+	)
+	if err := os.WriteFile(relPath, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyring.MockInit()
+	if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+		t.Fatal(err)
+	}
+	const geminiItem = `{"api_key":"gemini-key-value"}`
+	if err := keyring.Set("docs-cli", "gemini-api-key", geminiItem); err != nil {
+		t.Fatal(err)
+	}
+	rejectFM(t)
+	var calls callCount
+	cfg := &config.Config{
+		Mode:          "development",
+		FilePath:      filepath.Join(dir, ".env.example"),
+		DriveFolderID: folderID,
+		DefaultTitle:  "From Env",
+		InsertIndex:   1,
+		ClientID:      "abc.apps.googleusercontent.com",
+		ClientSecret:  secretValue,
+	}
+	base := calls.hooks(cfg, docID, nil, nil)
+	base.CreateDocument = func(context.Context, string, string, string, int64) (string, error) {
+		t.Fatal("CreateDocument")
+		return "", nil
+	}
+	var gotTitle, gotFolder string
+	var got []byte
+	base.ImportPDF = func(_ context.Context, title, folder string, pdf []byte) (string, error) {
+		gotTitle, gotFolder = title, folder
+		got = append([]byte(nil), pdf...)
+		return docID, nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdin = failReader{t: t}
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"create", "--import", relPath}, base)
+	if code != 0 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	wantOut := docID + "\n" + docs.EditURL(docID) + "\n"
+	if stdout.String() != wantOut {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+	text := stderr.String()
+	imported := "docs-cli: imported " + relPath + " bytes=" + fmt.Sprint(len(payload))
+	credAt := strings.Index(text, "docs-cli: wrote credentials.json")
+	importedAt := strings.Index(text, imported)
+	createdAt := strings.Index(text, "docs-cli: created document "+docID)
+	if credAt < 0 || importedAt < credAt || createdAt < importedAt {
+		t.Fatalf("stderr %s", text)
+	}
+	if strings.Contains(text, "body_bytes") || strings.Contains(text, "SENTINEL-PDF") || strings.Contains(stdout.String(), "SENTINEL-PDF") {
+		t.Fatalf("stdout %q stderr %s", stdout.String(), text)
+	}
+	assertNoSecret(t, stdout.String(), text, secretValue)
+	assertRefreshUntouched(t)
+	gotKey, err := keyring.Get("docs-cli", "gemini-api-key")
+	if err != nil || gotKey != geminiItem {
+		t.Fatalf("gemini key %q err %v", gotKey, err)
+	}
+	if gotTitle != "From Env" || gotFolder != folderID || string(got) != payload {
+		t.Fatalf("title %q folder %q pdf %q", gotTitle, gotFolder, got)
+	}
+	if calls.load != 1 || calls.ensure != 0 || calls.auth != 1 || calls.create != 0 || calls.require != 1 || calls.write != 1 {
+		t.Fatalf("calls %+v", calls)
+	}
+	disk, err := os.ReadFile(relPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(disk) != payload {
+		t.Fatalf("file changed %q", disk)
+	}
+}
+
+func TestCreateImportTitleFolderAndPDFCase(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	const docID = "doc1234567890"
+	payload := []byte("%PDF-1.4\ncase\n")
+	if err := os.WriteFile(filepath.Join(dir, "Cover.PDF"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	flagFolder := "ZZ_folder_99"
+	var calls callCount
+	cfg := &config.Config{
+		Mode:          "development",
+		FilePath:      "/tmp/.env.example",
+		DriveFolderID: folderID,
+		DefaultTitle:  "From Env",
+		InsertIndex:   1,
+	}
+	base := calls.hooks(cfg, docID, nil, nil)
+	base.CreateDocument = func(context.Context, string, string, string, int64) (string, error) {
+		t.Fatal("CreateDocument")
+		return "", nil
+	}
+	var gotTitle, gotFolder string
+	var got []byte
+	base.ImportPDF = func(_ context.Context, title, folder string, pdf []byte) (string, error) {
+		gotTitle, gotFolder = title, folder
+		got = append([]byte(nil), pdf...)
+		return docID, nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdin = failReader{t: t}
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"create", "--title", "  MY Cover Letter  ", "--folder", "  " + flagFolder + "  ", "--import", "Cover.PDF"}, base)
+	if code != 0 {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	if gotTitle != "MY Cover Letter" || gotFolder != flagFolder || !bytes.Equal(got, payload) {
+		t.Fatalf("title %q folder %q pdf %q", gotTitle, gotFolder, got)
+	}
+	if stdout.String() != docID+"\n"+docs.EditURL(docID)+"\n" || calls.create != 0 {
+		t.Fatalf("stdout %q calls %+v", stdout.String(), calls)
+	}
+	if !strings.Contains(stderr.String(), "docs-cli: imported Cover.PDF bytes="+fmt.Sprint(len(payload))) {
+		t.Fatalf("stderr %s", stderr.String())
+	}
+}
+
+func TestCreateImportFollowsFileSymlink(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	const docID = "doc1234567890"
+	payload := []byte("%PDF-1.4\nlink\n")
+	target := filepath.Join(dir, "target.pdf")
+	if err := os.WriteFile(target, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "link.pdf")); err != nil {
+		t.Fatal(err)
+	}
+	var calls callCount
+	cfg := &config.Config{Mode: "development", FilePath: "/tmp/.env.example", DriveFolderID: folderID, DefaultTitle: "Untitled", InsertIndex: 1}
+	base := calls.hooks(cfg, docID, nil, nil)
+	var got []byte
+	base.ImportPDF = func(_ context.Context, title, folder string, pdf []byte) (string, error) {
+		if title != "Untitled" || folder != folderID {
+			t.Fatalf("title %q folder %q", title, folder)
+		}
+		got = append([]byte(nil), pdf...)
+		return docID, nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdin = failReader{t: t}
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"create", "--import", "link.pdf"}, base)
+	if code != 0 || !bytes.Equal(got, payload) {
+		t.Fatalf("exit %d pdf %q stderr %s", code, got, stderr.String())
+	}
+	if _, err := os.Lstat(target); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateImportExactCap(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	body := append([]byte("%PDF-"), bytes.Repeat([]byte("a"), docs.MaxBodyBytes-len("%PDF-"))...)
+	if len(body) != docs.MaxBodyBytes {
+		t.Fatalf("len %d", len(body))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cap.pdf"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls callCount
+	cfg := &config.Config{Mode: "development", FilePath: "/tmp/.env.example", DriveFolderID: folderID, DefaultTitle: "Untitled", InsertIndex: 1}
+	base := calls.hooks(cfg, "doc1234567890", nil, nil)
+	var got int
+	base.ImportPDF = func(_ context.Context, _, _ string, pdf []byte) (string, error) {
+		got = len(pdf)
+		return "doc1234567890", nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"create", "--import", "cap.pdf"}, base)
+	if code != 0 || got != docs.MaxBodyBytes || calls.create != 0 {
+		t.Fatalf("exit %d len %d calls %+v stderr %s", code, got, calls, stderr.String())
+	}
+}
+
+func TestCreateImportFailureIsNotSuccess(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "bad-result.pdf"), []byte("%PDF-1.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const docID = "doc1234567890"
+	var calls callCount
+	cfg := &config.Config{Mode: "development", FilePath: "/tmp/.env.example", DriveFolderID: folderID, DefaultTitle: "Untitled", InsertIndex: 1}
+	base := calls.hooks(cfg, docID, nil, nil)
+	base.CreateDocument = func(context.Context, string, string, string, int64) (string, error) {
+		t.Fatal("CreateDocument")
+		return "", nil
+	}
+	base.ImportPDF = func(context.Context, string, string, []byte) (string, error) {
+		return docID, fmt.Errorf("docs-cli: import did not create a Google Doc: %s", docID)
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"create", "--import", "bad-result.pdf"}, base)
+	if code != 1 || stdout.Len() != 0 {
+		t.Fatalf("exit %d stdout %q", code, stdout.String())
+	}
+	text := stderr.String()
+	if !strings.Contains(text, "docs-cli: import did not create a Google Doc: "+docID) || strings.Contains(text, "docs-cli: created document") || strings.Contains(text, "docs-cli: imported ") || strings.Contains(text, docs.EditURL(docID)) {
+		t.Fatalf("stderr %s", text)
+	}
+}
+
+func TestCreateImportEmptyFolderSkipsClient(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "ok.pdf"), []byte("%PDF-1.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := strings.ReplaceAll(exampleEnv(), "you@gmail.com", "dev@example.com")
+	env = strings.ReplaceAll(env, "GOOGLE_OAUTH_CLIENT_ID=\n", "GOOGLE_OAUTH_CLIENT_ID=abc.apps.googleusercontent.com\n")
+	env = strings.ReplaceAll(env, "GOOGLE_OAUTH_CLIENT_SECRET=\n", "GOOGLE_OAUTH_CLIENT_SECRET="+secretValue+"\n")
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte(env), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var calls callCount
+	base := calls.hooks(nil, "", nil, nil)
+	base.Load = nil
+	base.RequireClient = func(*config.Config) error {
+		calls.require++
+		return nil
+	}
+	base.WriteCredentials = func(*config.Config) error {
+		calls.write++
+		return nil
+	}
+	base.Authorize = func(context.Context, *config.Config, oauth.Options) (*oauth2.Token, error) {
+		calls.auth++
+		return nil, nil
+	}
+	base.ImportPDF = func(context.Context, string, string, []byte) (string, error) {
+		t.Fatal("ImportPDF")
+		return "", nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=development"}
+	base.Root = dir
+	code := run([]string{"create", "--import", "ok.pdf"}, base)
+	if code != 1 || !strings.Contains(stderr.String(), "docs-cli: GOOGLE_DRIVE_FOLDER_ID is required") {
+		t.Fatalf("exit %d stderr %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 || calls.require != 0 || calls.write != 0 || calls.auth != 0 || calls.create != 0 {
+		t.Fatalf("stdout %q calls %+v", stdout.String(), calls)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "credentials.json")); !os.IsNotExist(err) {
+		t.Fatalf("credentials: %v", err)
+	}
+}
+
+func TestCreateImportProductionUsesWizard(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "ok.pdf"), []byte("%PDF-1.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Mode:          "production",
+		FilePath:      "/tmp/.env",
+		DriveFolderID: folderID,
+		DefaultTitle:  "Untitled",
+		InsertIndex:   1,
+	}
+	var calls callCount
+	base := calls.hooks(cfg, "doc1234567890", nil, nil)
+	base.ImportPDF = func(context.Context, string, string, []byte) (string, error) {
+		return "doc1234567890", nil
+	}
+	var stdout, stderr bytes.Buffer
+	base.Stdout = &stdout
+	base.Stderr = &stderr
+	base.Environ = []string{"APP_ENV=production"}
+	base.Root = dir
+	code := run([]string{"create", "--title", "Demo", "--import", "ok.pdf"}, base)
+	if code != 0 || calls.ensure != 1 || calls.load != 0 || calls.create != 0 {
+		t.Fatalf("exit %d calls %+v stderr %s", code, calls, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "docs-cli: mode=production file=.env") || !strings.Contains(stderr.String(), "docs-cli: imported ok.pdf bytes=9") {
+		t.Fatalf("stderr %s", stderr.String())
 	}
 }
 
@@ -3421,7 +3873,7 @@ func TestDraftPDF(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Contains(body, []byte("(Dear team,) Tj\nT*\nT*\n(I write to apply.) Tj\n")) {
+		if !bytes.Contains(body, []byte("(Dear team,) Tj\n0 -20 Td\n0 -20 Td\n(I write to apply.) Tj\n")) {
 			t.Fatal("content stream")
 		}
 		if !bytes.Contains(buildParenthesisPDF(t), []byte(`\(`)) {

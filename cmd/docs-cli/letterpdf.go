@@ -16,7 +16,12 @@ const (
 	pdfPageHeight = 84189 // 841.89 pt, A4
 	pdfMargin     = 7200  // 72 pt
 	pdfFontSize   = 1100  // 11 pt
-	pdfLeading    = 1600  // 16 pt
+	pdfLeading    = 1600  // 16 pt between wrapped pieces of one source line
+	// pdfBreak is the gap between source lines. Google Docs PDF import joins
+	// baselines 16 or 18 points apart and starts a paragraph at 20, so a
+	// subject line, a salutation, and the following paragraph stay apart.
+	// Wrapped pieces stay on pdfLeading and remain one paragraph.
+	pdfBreak = 2000 // 20 pt
 
 	// pdfMaxWidth is the text width in thousandths of a point: (595.28-144)*1000.
 	pdfMaxWidth = 595280 - 2*72000
@@ -88,20 +93,39 @@ func writeDraftPDF(dir, name, letter string) (string, error) {
 	return abs, nil
 }
 
+// pdfLine is one visual row. gapBefore is the drop from the previous
+// baseline, in hundredths of a point. The first row on a page ignores it.
+type pdfLine struct {
+	text      []byte
+	gapBefore int
+}
+
 // buildLetterPDF lays the letter out on A4 in Helvetica 11 pt.
 // A trailing newline does not add a blank line. \r\n and a lone \r become \n.
+// A source newline drops pdfBreak. A wrap inside one source line drops pdfLeading.
 func buildLetterPDF(letter string) ([]byte, error) {
-	var visual [][]byte
+	var lines []pdfLine
 	for _, part := range splitLetterLines(letter) {
 		encoded, err := encodeWinAnsi(part)
 		if err != nil {
 			return nil, err
 		}
-		visual = append(visual, wrapWinAnsi(encoded)...)
+		wrapped := wrapWinAnsi(encoded)
+		for j, piece := range wrapped {
+			gap := 0
+			if len(lines) > 0 {
+				if j == 0 {
+					gap = pdfBreak
+				} else {
+					gap = pdfLeading
+				}
+			}
+			lines = append(lines, pdfLine{text: piece, gapBefore: gap})
+		}
 	}
-	pages := paginateLetter(visual)
+	pages := paginateLetter(lines)
 	if len(pages) == 0 {
-		pages = [][][]byte{nil}
+		pages = [][]pdfLine{nil}
 	}
 	return renderLetterPDF(pages), nil
 }
@@ -237,23 +261,30 @@ func helveticaWidth(line []byte) int {
 	return w
 }
 
-// paginateLetter starts a new page when the next baseline would be above
-// the bottom margin. The first baseline is 841.89-72-11.
-func paginateLetter(lines [][]byte) [][][]byte {
+// paginateLetter starts a new page when the next baseline would fall below
+// the bottom margin. The first baseline is 841.89-72-11. A line that opens
+// a page keeps that baseline and does not apply gapBefore.
+func paginateLetter(lines []pdfLine) [][]pdfLine {
 	if len(lines) == 0 {
 		return nil
 	}
-	var pages [][][]byte
-	var page [][]byte
-	y := pdfPageHeight - pdfMargin - pdfFontSize
+	first := pdfPageHeight - pdfMargin - pdfFontSize
+	var pages [][]pdfLine
+	var page []pdfLine
+	y := first
 	for _, line := range lines {
-		if y < pdfMargin {
+		gap := line.gapBefore
+		if len(page) == 0 {
+			gap = 0
+		}
+		next := y - gap
+		if len(page) > 0 && next < pdfMargin {
 			pages = append(pages, page)
 			page = nil
-			y = pdfPageHeight - pdfMargin - pdfFontSize
+			next = first
 		}
 		page = append(page, line)
-		y -= pdfLeading
+		y = next
 	}
 	if len(page) > 0 {
 		pages = append(pages, page)
@@ -261,20 +292,19 @@ func paginateLetter(lines [][]byte) [][][]byte {
 	return pages
 }
 
-func pageStream(lines [][]byte) string {
+func pageStream(lines []pdfLine) string {
 	var b strings.Builder
 	b.WriteString("BT\n")
 	fmt.Fprintf(&b, "/F1 %s Tf\n", formatPt(pdfFontSize))
-	fmt.Fprintf(&b, "%s TL\n", formatPt(pdfLeading))
 	fmt.Fprintf(&b, "%s %s Td\n", formatPt(pdfMargin), formatPt(pdfPageHeight-pdfMargin-pdfFontSize))
 	for i, line := range lines {
-		if i > 0 {
-			b.WriteString("T*\n")
+		if i > 0 && line.gapBefore > 0 {
+			fmt.Fprintf(&b, "0 -%s Td\n", formatPt(line.gapBefore))
 		}
-		if len(line) == 0 {
+		if len(line.text) == 0 {
 			continue
 		}
-		b.WriteString(pdfString(line))
+		b.WriteString(pdfString(line.text))
 		b.WriteString(" Tj\n")
 	}
 	b.WriteString("ET\n")
@@ -308,7 +338,7 @@ func formatPt(hundredths int) string {
 	return fmt.Sprintf("%d.%02d", hundredths/100, hundredths%100)
 }
 
-func renderLetterPDF(pages [][][]byte) []byte {
+func renderLetterPDF(pages [][]pdfLine) []byte {
 	streams := make([]string, len(pages))
 	for i, lines := range pages {
 		streams[i] = pageStream(lines)

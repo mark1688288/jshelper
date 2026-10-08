@@ -13,6 +13,8 @@ Do not commit `.env`, `credentials.json`, `token.json`, `/design`, an OAuth clie
 
 `upload` copies one or more `.json` files into that same folder. Each file is stored as `application/json`.
 
+With --import PATH, create converts that PDF into the Google Doc and puts it in the same folder. The document title is --title, or DOCS_DEFAULT_TITLE when --title is omitted.
+
 The consent screen authorizes this app to see, edit, create, and delete all of your Google Drive files. The program only reads the one folder you name. `create` adds one document there. `upload` adds the JSON files you name.
 
 ## Prerequisites
@@ -85,6 +87,10 @@ On macOS, go-keyring writes to Keychain. Keychain encrypts the item at rest and 
 
 ```bash
 go run ./cmd/docs-cli create --title "Demo" --text "hello"
+```
+
+```bash
+go run ./cmd/docs-cli create --title "MY Cover Letter" --import ./drafts/customname.pdf
 ```
 
 The release binary defaults to production when it is built with this link flag. Run it from the repository root, the directory that contains `.env.example`. A non-empty `APP_ENV` in the process environment overrides the compiled default.
