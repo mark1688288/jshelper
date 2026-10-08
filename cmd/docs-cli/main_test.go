@@ -2853,13 +2853,14 @@ func TestDraftCommandFakeFM(t *testing.T) {
 			t.Fatalf("program dir %v err %v", entries, err)
 		}
 		template := writeDraftEmailPDF(t)
+		cv := writeDraftCVPDF(t)
 		path := writeJobJSON(t, doc)
 		var calls [][]string
 		scriptedFM(t, &calls,
 			fmStep{stdout: "not-a-letter", stderr: "available noise"},
 			fmStep{stdout: "{\"letter\":\"hi\\n\\n\"}\n", stderr: "respond noise"},
 		)
-		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
 		if code != 0 || stderr != "" {
 			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
 		}
@@ -2915,6 +2916,9 @@ func TestDraftCommandFakeFM(t *testing.T) {
 		if !strings.Contains(text, "Duties:\n(none)") || !strings.Contains(text, "Company:\nCOMPANY-TOKEN") {
 			t.Fatalf("text %q", text)
 		}
+		if !strings.Contains(text, "CV:\nCV-SKILL-TOKEN ada@example.com\n") || strings.Index(text, "CV:\n") > strings.Index(text, "Template:\n") {
+			t.Fatalf("text %q", text)
+		}
 		for _, banned := range []string{
 			apiKey, "person@example.com", "TRAILER-SENTINEL", "BENEFITS-TOKEN",
 			"LOCATION-TOKEN", "WORKTYPE-TOKEN", "CLASS-TOKEN", doc.Source,
@@ -2939,10 +2943,11 @@ func TestDraftCommandFakeFM(t *testing.T) {
 	t.Run("adds a newline", func(t *testing.T) {
 		root := t.TempDir()
 		template := writeDraftEmailPDF(t)
+		cv := writeDraftCVPDF(t)
 		path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 		var calls [][]string
 		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: `{"letter":"Hi there"}`})
-		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
 		if code != 0 || stderr != "" {
 			t.Fatalf("exit %d stderr %q", code, stderr)
 		}
@@ -2972,10 +2977,11 @@ func TestDraftCommandFakeFM(t *testing.T) {
 			t.Fatal(err)
 		}
 		template := writeDraftEmailPDF(t)
+		cv := writeDraftCVPDF(t)
 		path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 		var calls [][]string
 		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: "{\"letter\":\"hi\\n\\n\"}\n"})
-		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
 		if code != 0 || stderr != "" {
 			t.Fatalf("exit %d stderr %q", code, stderr)
 		}
@@ -3001,9 +3007,10 @@ func TestDraftUsesWorkingDirectory(t *testing.T) {
 	t.Cleanup(restoreDraftRoot)
 	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 	template := writeDraftEmailPDF(t)
+	cv := writeDraftCVPDF(t)
 	var calls [][]string
 	scriptedFM(t, &calls, fmStep{}, fmStep{stdout: `{"letter":"Hi there"}`})
-	stdout, stderr, code := runDraftArgs(t, "", path, template)
+	stdout, stderr, code := runDraftArgs(t, "", path, template, cv)
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
 	}
@@ -3032,12 +3039,13 @@ func TestDraftEmptyRequirementsBeforeTemplate(t *testing.T) {
 	for _, doc := range docs {
 		root := t.TempDir()
 		template := filepath.Join(t.TempDir(), "template-not-opened.pdf")
+		cv := filepath.Join(t.TempDir(), "cv-not-opened.pdf")
 		path := writeJobJSON(t, doc)
-		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
 		if code != 1 || stdout != "" || stderr != "docs-cli: requirements is empty\n" {
 			t.Fatalf("doc %#v exit %d stdout %q stderr %q", doc.Requirements, code, stdout, stderr)
 		}
-		if strings.Contains(stderr, "template-not-opened.pdf") {
+		if strings.Contains(stderr, "template-not-opened.pdf") || strings.Contains(stderr, "cv-not-opened.pdf") {
 			t.Fatalf("stderr %q", stderr)
 		}
 		assertDraftsEmpty(t, root)
@@ -3049,11 +3057,12 @@ func TestDraftMissingJSONBeforeTemplate(t *testing.T) {
 	root := t.TempDir()
 	jsonPath := filepath.Join(t.TempDir(), "missing.json")
 	template := filepath.Join(t.TempDir(), "template-not-opened.pdf")
-	stdout, stderr, code := runDraftArgs(t, root, jsonPath, template)
+	cv := filepath.Join(t.TempDir(), "cv-not-opened.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, jsonPath, template, cv)
 	if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || !strings.Contains(stderr, jsonPath) {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
-	if strings.Contains(stderr, template) || strings.Contains(stderr, "template has no text") {
+	if strings.Contains(stderr, template) || strings.Contains(stderr, cv) || strings.Contains(stderr, "template has no text") {
 		t.Fatalf("stderr %q", stderr)
 	}
 	assertDraftsEmpty(t, root)
@@ -3064,11 +3073,12 @@ func TestDraftInvalidJSONBeforeTemplate(t *testing.T) {
 	root := t.TempDir()
 	jsonPath := writeFile(t, "bad.json", []byte("{"))
 	template := filepath.Join(t.TempDir(), "template-not-opened.pdf")
-	stdout, stderr, code := runDraftArgs(t, root, jsonPath, template)
+	cv := filepath.Join(t.TempDir(), "cv-not-opened.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, jsonPath, template, cv)
 	if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || !strings.Contains(stderr, jsonPath) {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
-	if strings.Contains(stderr, template) {
+	if strings.Contains(stderr, template) || strings.Contains(stderr, cv) {
 		t.Fatalf("stderr %q", stderr)
 	}
 	assertDraftsEmpty(t, root)
@@ -3079,8 +3089,9 @@ func TestDraftTemplateTooLarge(t *testing.T) {
 	root := t.TempDir()
 	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 	template := writeFile(t, "over.bin", bytes.Repeat([]byte{'x'}, maxJSONBytes+1))
-	stdout, stderr, code := runDraftArgs(t, root, path, template)
-	if code != 1 || stdout != "" || stderr != "docs-cli: template exceeds 1 MiB\n" {
+	cv := filepath.Join(t.TempDir(), "cv-not-opened.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
+	if code != 1 || stdout != "" || stderr != "docs-cli: template exceeds 1 MiB\n" || strings.Contains(stderr, cv) {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
 	assertDraftsEmpty(t, root)
@@ -3091,8 +3102,9 @@ func TestDraftTemplateNoText(t *testing.T) {
 	root := t.TempDir()
 	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 	template := writeFile(t, "note.txt", []byte("not a pdf"))
-	stdout, stderr, code := runDraftArgs(t, root, path, template)
-	if code != 1 || stdout != "" || stderr != "docs-cli: template has no text\n" {
+	cv := filepath.Join(t.TempDir(), "cv-not-opened.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
+	if code != 1 || stdout != "" || stderr != "docs-cli: template has no text\n" || strings.Contains(stderr, cv) {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
 	assertDraftsEmpty(t, root)
@@ -3103,8 +3115,9 @@ func TestDraftTemplateNotRegular(t *testing.T) {
 	root := t.TempDir()
 	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 	template := t.TempDir()
-	stdout, stderr, code := runDraftArgs(t, root, path, template)
-	if code != 1 || stdout != "" || stderr != "docs-cli: template has no text\n" {
+	cv := filepath.Join(t.TempDir(), "cv-not-opened.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
+	if code != 1 || stdout != "" || stderr != "docs-cli: template has no text\n" || strings.Contains(stderr, cv) {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
 	assertDraftsEmpty(t, root)
@@ -3115,14 +3128,89 @@ func TestDraftTemplateMissing(t *testing.T) {
 	root := t.TempDir()
 	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 	template := filepath.Join(t.TempDir(), "missing.pdf")
-	stdout, stderr, code := runDraftArgs(t, root, path, template)
+	cv := filepath.Join(t.TempDir(), "cv-not-opened.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
 	if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || !strings.Contains(stderr, template) {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
-	if strings.Contains(stderr, "template has no text") {
+	if strings.Contains(stderr, "template has no text") || strings.Contains(stderr, cv) {
 		t.Fatalf("stderr %q", stderr)
 	}
 	assertDraftsEmpty(t, root)
+}
+
+func TestDraftCVTooLarge(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := writeDraftEmailPDF(t)
+	cv := writeFile(t, "cv-over.bin", bytes.Repeat([]byte{'x'}, maxJSONBytes+1))
+	stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
+	if code != 1 || stdout != "" || stderr != "docs-cli: cv exceeds 1 MiB\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftCVNoText(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := writeDraftEmailPDF(t)
+	cv := writeFile(t, "note.txt", []byte("not a pdf"))
+	stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
+	if code != 1 || stdout != "" || stderr != "docs-cli: cv has no text\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftCVNotRegular(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := writeDraftEmailPDF(t)
+	cv := t.TempDir()
+	stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
+	if code != 1 || stdout != "" || stderr != "docs-cli: cv has no text\n" {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftCVMissing(t *testing.T) {
+	rejectFM(t)
+	root := t.TempDir()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	template := writeDraftEmailPDF(t)
+	cv := filepath.Join(t.TempDir(), "missing-cv.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || !strings.Contains(stderr, cv) {
+		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, "cv has no text") {
+		t.Fatalf("stderr %q", stderr)
+	}
+	assertDraftsEmpty(t, root)
+}
+
+func TestDraftSamePath(t *testing.T) {
+	root := t.TempDir()
+	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
+	pdf := writeDraftEmailPDF(t)
+	var calls [][]string
+	scriptedFM(t, &calls, fmStep{}, fmStep{stdout: `{"letter":"Hi there"}`})
+	stdout, stderr, code := runDraftArgs(t, root, path, pdf, pdf)
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls %#v", calls)
+	}
+	text := calls[1][len(calls[1])-1]
+	if strings.Count(text, "ada@example.com") != 2 {
+		t.Fatalf("text %q", text)
+	}
 }
 
 func TestDraftArgLimit(t *testing.T) {
@@ -3137,7 +3225,7 @@ func TestDraftArgLimit(t *testing.T) {
 	if info.Size() >= int64(maxJSONBytes) || info.Size() <= 917000 {
 		t.Fatalf("json size %d", info.Size())
 	}
-	stdout, stderr, code := runDraftArgs(t, root, path, coverMinPath(t))
+	stdout, stderr, code := runDraftArgs(t, root, path, coverMinPath(t), coverMinPath(t))
 	if code != 1 || stdout != "" || stderr != "docs-cli: fm text exceeds the argument limit\n" {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
@@ -3147,12 +3235,13 @@ func TestDraftArgLimit(t *testing.T) {
 func TestDraftFMAvailableFails(t *testing.T) {
 	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 	template := writeDraftEmailPDF(t)
+	cv := writeDraftCVPDF(t)
 
 	t.Run("available", func(t *testing.T) {
 		root := t.TempDir()
 		var calls [][]string
 		scriptedFM(t, &calls, fmStep{stdout: `{"letter":"hi"}`, stderr: "not licensed\n", code: 1})
-		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
 		if code != 1 || stdout != "" || stderr != "docs-cli: fm: not licensed\n" {
 			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 		}
@@ -3169,7 +3258,7 @@ func TestDraftFMAvailableFails(t *testing.T) {
 			fmStep{},
 			fmStep{stdout: `{"letter":"hi"}`, stderr: "guardrail rejected\n", code: 1},
 		)
-		stdout, stderr, code := runDraftArgs(t, root, path, template)
+		stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
 		if code != 1 || stdout != "" || stderr != "docs-cli: fm: guardrail rejected\n" {
 			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 		}
@@ -3184,9 +3273,10 @@ func TestDraftRejectsModelProse(t *testing.T) {
 	root := t.TempDir()
 	path := writeJobJSON(t, jobad.Document{Requirements: []string{"Know Go"}})
 	template := writeDraftEmailPDF(t)
+	cv := writeDraftCVPDF(t)
 	var calls [][]string
 	scriptedFM(t, &calls, fmStep{}, fmStep{stdout: "The letter is ready.\n"})
-	stdout, stderr, code := runDraftArgs(t, root, path, template)
+	stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
 	if code != 1 || stdout != "" || stderr != "docs-cli: fm output is not the draft schema\n" {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
@@ -3228,8 +3318,11 @@ func TestDraftUsage(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  analyze --json PATH\n  draft --json PATH --template PATH\n") {
+	if !strings.Contains(usageText, "\n  analyze --json PATH\n  draft --json PATH --template PATH --cv PATH\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
+	}
+	if !strings.Contains(usageText, "\n  --template PATH  cover-letter template PDF\n  --cv PATH        CV or resume PDF\n") {
+		t.Fatalf("usage draft flags:\n%s", usageText)
 	}
 }
 
@@ -3266,7 +3359,8 @@ func TestDraftRejectsDraftsFile(t *testing.T) {
 	}
 	jsonPath := filepath.Join(root, "missing.json")
 	template := filepath.Join(root, "missing.pdf")
-	stdout, stderr, code := runDraftArgs(t, root, jsonPath, template)
+	cv := filepath.Join(root, "missing-cv.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, jsonPath, template, cv)
 	if code != 1 || stdout != "" || stderr != "docs-cli: drafts is not a directory\n" {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
@@ -3281,11 +3375,12 @@ func TestDraftJSONTooLarge(t *testing.T) {
 	root := t.TempDir()
 	path := writeFile(t, "over.json", bytes.Repeat([]byte{'x'}, maxJSONBytes+1))
 	template := filepath.Join(t.TempDir(), "template-not-opened.pdf")
-	stdout, stderr, code := runDraftArgs(t, root, path, template)
+	cv := filepath.Join(t.TempDir(), "cv-not-opened.pdf")
+	stdout, stderr, code := runDraftArgs(t, root, path, template, cv)
 	if code != 1 || stdout != "" || stderr != errJSONTooLarge+"\n" {
 		t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
-	if strings.Contains(stderr, template) {
+	if strings.Contains(stderr, template) || strings.Contains(stderr, cv) {
 		t.Fatalf("stderr %q", stderr)
 	}
 	assertDraftsEmpty(t, root)
@@ -3304,19 +3399,22 @@ func draftUsageCases() []struct {
 		{name: "no flag", args: []string{"draft"}},
 		{name: "missing json", args: []string{"draft", "--json"}},
 		{name: "missing template", args: []string{"draft", "--template"}},
-		{name: "empty json", args: []string{"draft", "--json", "", "--template", "letter.pdf"}},
-		{name: "empty template", args: []string{"draft", "--json", "job.json", "--template", ""}},
+		{name: "missing cv", args: []string{"draft", "--cv"}},
+		{name: "empty json", args: []string{"draft", "--json", "", "--template", "letter.pdf", "--cv", "cv.pdf"}},
+		{name: "empty template", args: []string{"draft", "--json", "job.json", "--template", "", "--cv", "cv.pdf"}},
+		{name: "empty cv", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "--cv", ""}},
 		{name: "json only", args: []string{"draft", "--json", "job.json"}},
 		{name: "template only", args: []string{"draft", "--template", "letter.pdf"}},
+		{name: "json and template", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf"}},
 		{name: "unknown flag", args: []string{"draft", "--bogus"}},
 		{name: "out flag", args: []string{"draft", "--out", "letter.txt"}},
-		{name: "extra arg", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "extra"}},
+		{name: "extra arg", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "--cv", "cv.pdf", "extra"}},
 		{name: "help", args: []string{"draft", "--help"}, exact: true},
 		{name: "short help", args: []string{"draft", "-h"}, exact: true},
 	}
 }
 
-func runDraftArgs(t *testing.T, root, jsonPath, templatePath string) (string, string, int) {
+func runDraftArgs(t *testing.T, root, jsonPath, templatePath, cvPath string) (string, string, int) {
 	t.Helper()
 	SetDraftRootForTest(root)
 	t.Cleanup(restoreDraftRoot)
@@ -3330,7 +3428,7 @@ func runDraftArgs(t *testing.T, root, jsonPath, templatePath string) (string, st
 		GeminiClient: blockGemini(t),
 	}
 	forbidEnv(t, &d)
-	code := run([]string{"draft", "--json", jsonPath, "--template", templatePath}, d)
+	code := run([]string{"draft", "--json", jsonPath, "--template", templatePath, "--cv", cvPath}, d)
 	return stdout.String(), stderr.String(), code
 }
 
@@ -3363,6 +3461,11 @@ func writeDraftEmailPDF(t *testing.T) string {
 		t.Fatalf("pdf Tj operands = %q", text)
 	}
 	return writeFile(t, "ada.pdf", body)
+}
+
+func writeDraftCVPDF(t *testing.T) string {
+	t.Helper()
+	return writeFile(t, "cv.pdf", draftTextPDF([]string{"CV-SKILL-TOKEN ada@example.com"}))
 }
 
 func coverMinPath(t *testing.T) string {
@@ -3615,7 +3718,7 @@ func TestUploadUsage(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  draft --json PATH --template PATH\n  upload [--folder FOLDER] PATH [PATH ...]\n") {
+	if !strings.Contains(usageText, "\n  draft --json PATH --template PATH --cv PATH\n  upload [--folder FOLDER] PATH [PATH ...]\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
 	}
 }
