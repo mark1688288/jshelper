@@ -35,7 +35,7 @@ commands:
   parse --txt PATH
   gemini-key
   analyze --json PATH
-  draft --json PATH --template PATH --cv PATH
+  draft --json PATH --template PATH --cv PATH [--pdf NAME]
   upload [--folder FOLDER] PATH [PATH ...]
 
 create:
@@ -58,6 +58,7 @@ draft:
   --json PATH      section JSON from parse
   --template PATH  cover-letter template PDF
   --cv PATH        CV or resume PDF
+  --pdf NAME       PDF file name in drafts; omitted means a timestamped .txt file
 
 upload:
   PATH             one or more .json files
@@ -895,6 +896,7 @@ func runDraft(args []string, d deps) int {
 	jsonFlag := fs.String("json", "", "section JSON from parse")
 	templateFlag := fs.String("template", "", "cover-letter template PDF")
 	cvFlag := fs.String("cv", "", "CV or resume PDF")
+	pdfFlag := fs.String("pdf", "", "PDF file name in drafts; omitted means a timestamped .txt file")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -902,7 +904,7 @@ func runDraft(args []string, d deps) int {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
 	}
-	jsonSet, templateSet, cvSet := false, false, false
+	jsonSet, templateSet, cvSet, pdfSet := false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "json":
@@ -911,11 +913,17 @@ func runDraft(args []string, d deps) int {
 			templateSet = true
 		case "cv":
 			cvSet = true
+		case "pdf":
+			pdfSet = true
 		}
 	})
-	if !jsonSet || *jsonFlag == "" || !templateSet || *templateFlag == "" || !cvSet || *cvFlag == "" {
+	if !jsonSet || *jsonFlag == "" || !templateSet || *templateFlag == "" || !cvSet || *cvFlag == "" || (pdfSet && *pdfFlag == "") {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
+	}
+	if pdfSet && !validPDFName(*pdfFlag) {
+		fmt.Fprintf(d.Stderr, "docs-cli: not a pdf file: %s\n", *pdfFlag)
+		return 1
 	}
 
 	// A valid draft checks ./drafts in the working directory before it reads JSON.
@@ -927,6 +935,17 @@ func runDraft(args []string, d deps) int {
 	if err != nil {
 		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 		return 1
+	}
+	if pdfSet {
+		_, err := os.Lstat(filepath.Join(dir, *pdfFlag))
+		if err == nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: pdf already exists: %s\n", *pdfFlag)
+			return 1
+		}
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
 	}
 
 	raw, err := readLimitedFile(*jsonFlag, maxJSONBytes)
@@ -974,8 +993,18 @@ func runDraft(args []string, d deps) int {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
 	}
-	path, err := writeDraftLetter(dir, letter)
+	var path string
+	if pdfSet {
+		path, err = writeDraftPDF(dir, *pdfFlag, letter)
+	} else {
+		path, err = writeDraftLetter(dir, letter)
+	}
 	if err != nil {
+		var exists *pdfExistsError
+		if errors.Is(err, errPDFNotEncodable) || errors.As(err, &exists) {
+			fmt.Fprintln(d.Stderr, err.Error())
+			return 1
+		}
 		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 		return 1
 	}
