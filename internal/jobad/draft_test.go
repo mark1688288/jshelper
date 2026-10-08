@@ -35,15 +35,15 @@ func TestDraftPromptShape(t *testing.T) {
 		Duties:       nil,
 		Requirements: []string{"Know Go", "React (For Frontend)"},
 	}
-	got, err := DraftPrompt(doc, "Dear team\nada@example.com")
+	got, err := DraftPrompt(doc, "Dear team\nada@example.com", "CV-SKILL-TOKEN")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "Title:\nSystem Analyst\n\nCompany:\n(none)\n\nDuties:\n(none)\n\nRequirements:\n- Know Go\n- React (For Frontend)\n\nTemplate:\nDear team\nada@example.com\n"
+	want := "Title:\nSystem Analyst\n\nCompany:\n(none)\n\nDuties:\n(none)\n\nRequirements:\n- Know Go\n- React (For Frontend)\n\nCV:\nCV-SKILL-TOKEN\n\nTemplate:\nDear team\nada@example.com\n"
 	if got != want {
 		t.Fatalf("prompt =\n%s\nwant =\n%s", got, want)
 	}
-	order := []string{"Title:\n", "Company:\n", "Duties:\n", "Requirements:\n", "Template:\n"}
+	order := []string{"Title:\n", "Company:\n", "Duties:\n", "Requirements:\n", "CV:\n", "Template:\n"}
 	at := 0
 	for _, label := range order {
 		i := strings.Index(got, label)
@@ -59,11 +59,11 @@ func TestDraftPromptShape(t *testing.T) {
 	withDuties := doc
 	withDuties.Duties = []string{"Build services"}
 	withDuties.Requirements = []string{"Know Go"}
-	got, err = DraftPrompt(withDuties, "ada@example.com")
+	got, err = DraftPrompt(withDuties, "ada@example.com", "CV-SKILL-TOKEN")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = "Title:\nSystem Analyst\n\nCompany:\n(none)\n\nDuties:\n- Build services\n\nRequirements:\n- Know Go\n\nTemplate:\nada@example.com\n"
+	want = "Title:\nSystem Analyst\n\nCompany:\n(none)\n\nDuties:\n- Build services\n\nRequirements:\n- Know Go\n\nCV:\nCV-SKILL-TOKEN\n\nTemplate:\nada@example.com\n"
 	if got != want {
 		t.Fatalf("duties prompt =\n%s\nwant =\n%s", got, want)
 	}
@@ -277,7 +277,7 @@ func TestDraftAppliesLayout(t *testing.T) {
 	})
 	t.Cleanup(restoreFMStub)
 
-	got, err := Draft(doc, "ada@example.com")
+	got, err := Draft(doc, "ada@example.com", "CV-SKILL-TOKEN")
 	if err != nil || got != "Yours sincerely,\n" {
 		t.Fatalf("got %q err %v", got, err)
 	}
@@ -293,7 +293,7 @@ func TestDraftAppliesLayout(t *testing.T) {
 		}
 		return []byte(`{"letter":"[Your name]"}`), nil, 0
 	})
-	got, err = Draft(doc, "ada@example.com")
+	got, err = Draft(doc, "ada@example.com", "CV-SKILL-TOKEN")
 	if got != "" || !errors.Is(err, ErrDraftSchema) || err.Error() != "docs-cli: fm output is not the draft schema" {
 		t.Fatalf("blank got %q err %v", got, err)
 	}
@@ -317,7 +317,7 @@ func TestDraftPromptOmitsUnusedFields(t *testing.T) {
 		Requirements: []string{"Know Go"},
 		Trailer:      []string{"TRAILER-SENTINEL"},
 	}
-	got, err := DraftPrompt(doc, "ada@example.com")
+	got, err := DraftPrompt(doc, "ada@example.com", "CV-SKILL-TOKEN")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestDraftPromptOmitsUnusedFields(t *testing.T) {
 			t.Fatalf("prompt contains %q\n%s", banned, got)
 		}
 	}
-	for _, keep := range []string{"Title:\nSystem Analyst", "Company:\nCOMPANY-TOKEN", "Duties:\n- Build services", "Requirements:\n- Know Go", "Template:\nada@example.com"} {
+	for _, keep := range []string{"Title:\nSystem Analyst", "Company:\nCOMPANY-TOKEN", "Duties:\n- Build services", "Requirements:\n- Know Go", "CV:\nCV-SKILL-TOKEN", "Template:\nada@example.com"} {
 		if !strings.Contains(got, keep) {
 			t.Fatalf("prompt missing %q\n%s", keep, got)
 		}
@@ -351,22 +351,33 @@ func TestDraftPromptRedactsJobNotTemplate(t *testing.T) {
 		Duties:       []string{"Mail person@example.com daily"},
 		Requirements: []string{"person@example.com", "Know Go"},
 	}
-	got, err := DraftPrompt(doc, "ada@example.com")
+	cv := "Led the ERP in C#.\nada@example.com"
+	got, err := DraftPrompt(doc, "Dear team,\n", cv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(got, "person@example.com") {
 		t.Fatalf("prompt contains job email\n%s", got)
 	}
-	for _, keep := range []string{"Analyst", "Mail daily", "Know Go", "ada@example.com", "Company:\nAcme Ltd"} {
+	for _, keep := range []string{
+		"Analyst",
+		"Mail daily",
+		"Know Go",
+		"Company:\nAcme Ltd",
+		"CV:\n" + cv + "\n",
+		"Template:\nDear team,\n",
+	} {
 		if !strings.Contains(got, keep) {
 			t.Fatalf("prompt missing %q\n%s", keep, got)
 		}
 	}
+	if strings.Index(got, "CV:\n") > strings.Index(got, "Template:\n") {
+		t.Fatalf("CV is not before Template\n%s", got)
+	}
 
 	emailOnly := doc
 	emailOnly.Header.Company = "person@example.com"
-	got, err = DraftPrompt(emailOnly, "ada@example.com")
+	got, err = DraftPrompt(emailOnly, "Dear team,\n", cv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,10 +485,38 @@ func TestDraftSkipsFMWhenRequirementsEmpty(t *testing.T) {
 		{Requirements: []string{"person@example.com"}, Trailer: []string{"TRAILER-SENTINEL"}},
 	}
 	for _, doc := range docs {
-		got, err := Draft(doc, "ada@example.com")
+		got, err := Draft(doc, "ada@example.com", "")
 		if got != "" || !errors.Is(err, ErrRequirementsEmpty) {
 			t.Fatalf("doc %#v got %q err %v", doc.Requirements, got, err)
 		}
+	}
+	if calls != 0 {
+		t.Fatalf("calls = %d", calls)
+	}
+}
+
+func TestDraftSkipsFMWhenCVEmpty(t *testing.T) {
+	calls := 0
+	SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+		calls++
+		return nil, []byte("should not run"), 1
+	})
+	t.Cleanup(restoreFMStub)
+
+	doc := Document{Requirements: []string{"Know Go"}}
+	for _, cv := range []string{"", "   ", "\n\t"} {
+		got, err := Draft(doc, "ada@example.com", cv)
+		if got != "" || !errors.Is(err, ErrCVNoText) || err.Error() != "docs-cli: cv has no text" {
+			t.Fatalf("cv %q got %q err %v", cv, got, err)
+		}
+		got, err = DraftPrompt(doc, "ada@example.com", cv)
+		if got != "" || !errors.Is(err, ErrCVNoText) {
+			t.Fatalf("prompt cv %q got %q err %v", cv, got, err)
+		}
+	}
+	got, err := Draft(Document{}, "ada@example.com", "")
+	if got != "" || !errors.Is(err, ErrRequirementsEmpty) {
+		t.Fatalf("empty requirements got %q err %v", got, err)
 	}
 	if calls != 0 {
 		t.Fatalf("calls = %d", calls)
@@ -499,7 +538,7 @@ func TestDraftAvailableThenRespond(t *testing.T) {
 		Requirements: []string{"Know Go"},
 		Trailer:      []string{"TRAILER-SENTINEL"},
 	}
-	text, err := DraftPrompt(doc, "ada@example.com")
+	text, err := DraftPrompt(doc, "ada@example.com", "CV-SKILL-TOKEN")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +553,7 @@ func TestDraftAvailableThenRespond(t *testing.T) {
 	})
 	t.Cleanup(restoreFMStub)
 
-	got, err := Draft(doc, "ada@example.com")
+	got, err := Draft(doc, "ada@example.com", "CV-SKILL-TOKEN")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +579,7 @@ func TestDraftAvailableThenRespond(t *testing.T) {
 	if LetterSchema != wantSchema || LetterSchema == AnalysisSchema {
 		t.Fatalf("schema = %q", LetterSchema)
 	}
-	const wantInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. The template's blank line is a paragraph break. Keep it. A single newline is a line break. Keep it. Do not join two blocks that the template separates with a blank line. Do not insert a blank line where the template has only a single newline. Do not put each word on its own line. Do not put a trailing space on any line. Do not write a line that is only a space. Keep the template's language. Keep an applicant name or contact line only when the template gives that line as real text. When a real contact line is kept, put that line on its own line. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, and Requirements. Title is the role being applied for, not the applicant's current job. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, and do not use an employer from the template's previous role. When Company is (none), do not invent an employer and do not write (none) into the letter. Rewrite the body for this job's Duties and Requirements. Do not invent a recipient, job board, compliment, current job title, degree, date, or years of experience that appears in neither the template nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
+	const wantInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. The template's blank line is a paragraph break. Keep it. A single newline is a line break. Keep it. Do not join two blocks that the template separates with a blank line. Do not insert a blank line where the template has only a single newline. Do not put each word on its own line. Do not put a trailing space on any line. Do not write a line that is only a space. Keep the template's language. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, Requirements, and the CV. Fill a name, email, phone, or address blank only from the CV, and only when the CV states that fact as real text. Put each kept contact line on its own line. When the CV does not state that fact, omit the line. Do not copy the CV's expected salary, previous salary, or available date into the letter. Do not copy a CV section heading into the letter. Read the CV and choose only the skills, projects, and achievements that match this job's Duties and Requirements. Do not paste the CV. Do not claim a skill, employer, project, metric, degree, or year that the CV does not state. Title is the role being applied for, not the applicant's current job. Use a current job title only when the CV states it. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, from the template's previous role, or from an employer named in the CV. When Company is (none), do not invent an employer and do not write (none) into the letter. Keep the template's paragraph order. In those paragraphs, cover three things: the chosen experience and skills from the CV, tied to this job; interest in the employer and fit for the role, using only Company, Duties, Requirements, and those CV facts; and a polite close with a call to action in the template's closing shape. Do not add a paragraph the template does not separate, and do not drop a body paragraph the template separates with a blank line. Do not invent a recipient, job board, compliment, award, date, or meeting time that appears in neither the template, the CV, nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template, the CV, or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
 	if DraftInstructions != wantInstructions || strings.Contains(DraftInstructions, "\n") {
 		t.Fatalf("instructions = %q", DraftInstructions)
 	}
@@ -565,6 +604,9 @@ func TestDraftAvailableThenRespond(t *testing.T) {
 	if !strings.Contains(calls[1][len(calls[1])-1], "ada@example.com") {
 		t.Fatal("template email was removed")
 	}
+	if !strings.Contains(calls[1][len(calls[1])-1], "CV:\nCV-SKILL-TOKEN\n") {
+		t.Fatal("cv text was omitted")
+	}
 }
 
 func TestDraftAvailableFailureDoesNotRespond(t *testing.T) {
@@ -575,7 +617,7 @@ func TestDraftAvailableFailureDoesNotRespond(t *testing.T) {
 	})
 	t.Cleanup(restoreFMStub)
 
-	got, err := Draft(Document{Requirements: []string{"Know Go"}}, "ada@example.com")
+	got, err := Draft(Document{Requirements: []string{"Know Go"}}, "ada@example.com", "CV-SKILL-TOKEN")
 	if got != "" || err == nil || err.Error() != "docs-cli: fm: not licensed" {
 		t.Fatalf("got %q err %v", got, err)
 	}
@@ -608,7 +650,7 @@ func TestRespondArgvFits(t *testing.T) {
 	text, err := DraftPrompt(Document{
 		Header:       Header{TitleBlock: "System Analyst"},
 		Requirements: []string{"Know Go"},
-	}, "ada@example.com")
+	}, "ada@example.com", "CV-SKILL-TOKEN")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,13 +671,13 @@ func TestDraftArgLimitSkipsFM(t *testing.T) {
 
 	doc := Document{Requirements: []string{"Know Go"}}
 	draftEnviron = func() []string { return []string{strings.Repeat("E", kernArgMax)} }
-	got, err := Draft(doc, "ada@example.com")
+	got, err := Draft(doc, "ada@example.com", "CV-SKILL-TOKEN")
 	if got != "" || !errors.Is(err, ErrFMArgLimit) || err.Error() != "docs-cli: fm text exceeds the argument limit" {
 		t.Fatalf("env got %q err %v", got, err)
 	}
 
 	draftEnviron = func() []string { return nil }
-	got, err = Draft(doc, strings.Repeat("Q", 917488))
+	got, err = Draft(doc, strings.Repeat("Q", 917488), "CV-SKILL-TOKEN")
 	if got != "" || !errors.Is(err, ErrFMArgLimit) {
 		t.Fatalf("text got %q err %v", got, err)
 	}

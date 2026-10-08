@@ -30,6 +30,14 @@ var ErrTemplateTooLarge = errors.New("docs-cli: template exceeds 1 MiB")
 // cannot be read, or has no text after whitespace is collapsed.
 var ErrTemplateNoText = errors.New("docs-cli: template has no text")
 
+// ErrCVTooLarge is the CV size error. ExtractTemplateText still returns
+// ErrTemplateTooLarge; the CLI maps that error onto this text.
+var ErrCVTooLarge = errors.New("docs-cli: cv exceeds 1 MiB")
+
+// ErrCVNoText is returned when CV text has no fields. The CLI also maps
+// ErrTemplateNoText onto this text for a CV PDF.
+var ErrCVNoText = errors.New("docs-cli: cv has no text")
+
 // ErrFMArgLimit is returned when the respond argv would not fit in kern.argmax.
 // fm is not called.
 var ErrFMArgLimit = errors.New("docs-cli: fm text exceeds the argument limit")
@@ -38,8 +46,8 @@ var ErrFMArgLimit = errors.New("docs-cli: fm text exceeds the argument limit")
 var ErrDraftSchema = errors.New("docs-cli: fm output is not the draft schema")
 
 // DraftInstructions is the fm --instructions argument for a cover letter.
-// One prompt drafts the whole letter. The bytes match design PR 24.
-const DraftInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. The template's blank line is a paragraph break. Keep it. A single newline is a line break. Keep it. Do not join two blocks that the template separates with a blank line. Do not insert a blank line where the template has only a single newline. Do not put each word on its own line. Do not put a trailing space on any line. Do not write a line that is only a space. Keep the template's language. Keep an applicant name or contact line only when the template gives that line as real text. When a real contact line is kept, put that line on its own line. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, and Requirements. Title is the role being applied for, not the applicant's current job. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, and do not use an employer from the template's previous role. When Company is (none), do not invent an employer and do not write (none) into the letter. Rewrite the body for this job's Duties and Requirements. Do not invent a recipient, job board, compliment, current job title, degree, date, or years of experience that appears in neither the template nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
+// One prompt drafts the whole letter. The bytes match design PR 30.
+const DraftInstructions = `The template is a pattern for structure and voice only, not text to paste. Write the whole letter for this job. The template's blank line is a paragraph break. Keep it. A single newline is a line break. Keep it. Do not join two blocks that the template separates with a blank line. Do not insert a blank line where the template has only a single newline. Do not put each word on its own line. Do not put a trailing space on any line. Do not write a line that is only a space. Keep the template's language. A square-bracket placeholder is a blank, not text to copy. Do not leave any square-bracket placeholder in the letter. Fill the letter from Title, Company, Duties, Requirements, and the CV. Fill a name, email, phone, or address blank only from the CV, and only when the CV states that fact as real text. Put each kept contact line on its own line. When the CV does not state that fact, omit the line. Do not copy the CV's expected salary, previous salary, or available date into the letter. Do not copy a CV section heading into the letter. Read the CV and choose only the skills, projects, and achievements that match this job's Duties and Requirements. Do not paste the CV. Do not claim a skill, employer, project, metric, degree, or year that the CV does not state. Title is the role being applied for, not the applicant's current job. Use a current job title only when the CV states it. Company is this job's employer. When Company is not (none), use that name as the employer. Do not take the employer from a parenthetical in Title, from the template's previous role, or from an employer named in the CV. When Company is (none), do not invent an employer and do not write (none) into the letter. Keep the template's paragraph order. In those paragraphs, cover three things: the chosen experience and skills from the CV, tied to this job; interest in the employer and fit for the role, using only Company, Duties, Requirements, and those CV facts; and a polite close with a call to action in the template's closing shape. Do not add a paragraph the template does not separate, and do not drop a body paragraph the template separates with a blank line. Do not invent a recipient, job board, compliment, award, date, or meeting time that appears in neither the template, the CV, nor the JSON. Do not turn a required number of years into the applicant's years. When a blank has no fact in the template, the CV, or the JSON, omit that blank. The letter field is the whole letter and nothing else.`
 
 // wrapGapMax is the widest leftover that still counts as a wrapped line.
 // A leftover of zero belongs to the line that sets the page's right edge.
@@ -106,12 +114,17 @@ func CheckDraftRequirements(doc Document) error {
 }
 
 // DraftPrompt builds the fm --text value for a cover letter.
-// Order is Title, Company, Duties, Requirements, Template.
-// Template text is used as extracted and is not redacted. Job emails are removed.
-// An empty company prints (none). An empty requirements list returns ErrRequirementsEmpty.
-func DraftPrompt(doc Document, templateText string) (string, error) {
+// Order is Title, Company, Duties, Requirements, CV, Template.
+// Template text and CV text are used as extracted and are not redacted.
+// Job emails are removed. An empty company prints (none).
+// An empty requirements list returns ErrRequirementsEmpty before the CV is checked.
+// CV text with no fields returns ErrCVNoText and does not build the prompt.
+func DraftPrompt(doc Document, templateText, cvText string) (string, error) {
 	if err := CheckDraftRequirements(doc); err != nil {
 		return "", err
+	}
+	if len(strings.Fields(cvText)) == 0 {
+		return "", ErrCVNoText
 	}
 	company := redact(doc.Header.Company)
 	if company == "" {
@@ -122,6 +135,7 @@ func DraftPrompt(doc Document, templateText string) (string, error) {
 	writeBlock(&b, "Company:", company)
 	writeBlock(&b, "Duties:", listBody(promptLines(doc.Duties)))
 	writeBlock(&b, "Requirements:", listBody(promptLines(doc.Requirements)))
+	writeBlock(&b, "CV:", cvText)
 	writeBlock(&b, "Template:", templateText)
 	return b.String(), nil
 }
@@ -325,8 +339,9 @@ func isPlaceholderLine(line string) bool {
 // Draft calls fm available, then fm respond, and returns the letter.
 // It does not create a directory or write a file.
 // An empty requirements list returns ErrRequirementsEmpty and does not call fm.
-func Draft(doc Document, templateText string) (string, error) {
-	text, err := DraftPrompt(doc, templateText)
+// CV text with no fields returns ErrCVNoText and does not call fm.
+func Draft(doc Document, templateText, cvText string) (string, error) {
+	text, err := DraftPrompt(doc, templateText, cvText)
 	if err != nil {
 		return "", err
 	}

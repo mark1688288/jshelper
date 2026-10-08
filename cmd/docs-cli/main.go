@@ -35,7 +35,7 @@ commands:
   parse --txt PATH
   gemini-key
   analyze --json PATH
-  draft --json PATH --template PATH
+  draft --json PATH --template PATH --cv PATH
   upload [--folder FOLDER] PATH [PATH ...]
 
 create:
@@ -57,6 +57,7 @@ analyze:
 draft:
   --json PATH      section JSON from parse
   --template PATH  cover-letter template PDF
+  --cv PATH        CV or resume PDF
 
 upload:
   PATH             one or more .json files
@@ -893,6 +894,7 @@ func runDraft(args []string, d deps) int {
 	fs := newFlagSet("draft", d.Stderr)
 	jsonFlag := fs.String("json", "", "section JSON from parse")
 	templateFlag := fs.String("template", "", "cover-letter template PDF")
+	cvFlag := fs.String("cv", "", "CV or resume PDF")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -900,16 +902,18 @@ func runDraft(args []string, d deps) int {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
 	}
-	jsonSet, templateSet := false, false
+	jsonSet, templateSet, cvSet := false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "json":
 			jsonSet = true
 		case "template":
 			templateSet = true
+		case "cv":
+			cvSet = true
 		}
 	})
-	if !jsonSet || *jsonFlag == "" || !templateSet || *templateFlag == "" {
+	if !jsonSet || *jsonFlag == "" || !templateSet || *templateFlag == "" || !cvSet || *cvFlag == "" {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
 	}
@@ -952,7 +956,20 @@ func runDraft(args []string, d deps) int {
 		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 		return 1
 	}
-	letter, err := jobad.Draft(doc, templateText)
+	cvText, err := jobad.ExtractTemplateText(*cvFlag)
+	if err != nil {
+		if errors.Is(err, jobad.ErrTemplateTooLarge) {
+			fmt.Fprintln(d.Stderr, jobad.ErrCVTooLarge.Error())
+			return 1
+		}
+		if errors.Is(err, jobad.ErrTemplateNoText) {
+			fmt.Fprintln(d.Stderr, jobad.ErrCVNoText.Error())
+			return 1
+		}
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	letter, err := jobad.Draft(doc, templateText, cvText)
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
