@@ -9,6 +9,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,9 +25,11 @@ const (
 	keyringService = "docs-cli"
 	geminiAccount  = "gemini-api-key"
 
-	// geminiModel is the Gemini API model id for section mapping and autoparse.
-	geminiModel = "gemini-3.1-flash-lite"
-	geminiURL   = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel + ":generateContent"
+	// geminiModel is the Gemini API model id used when GEMINI_MODEL is missing
+	// or empty in the production .env file.
+	geminiModel    = "gemini-3.1-flash-lite"
+	geminiModelKey = "GEMINI_MODEL"
+	geminiURL      = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel + ":generateContent"
 
 	geminiTimeout        = 60 * time.Second
 	maxKeyringBytes      = 4096
@@ -52,6 +57,79 @@ var (
 	errGeminiAutoparseHTTP     = errors.New("docs-cli: gemini autoparse rejected: http")
 	errGeminiAutoparseResponse = errors.New("docs-cli: gemini autoparse rejected: response")
 )
+
+// geminiEnvRoot is the directory whose .env supplies GEMINI_MODEL.
+// The CLI sets it to the working directory. Empty skips the file.
+var geminiEnvRoot string
+
+// SetGeminiEnvRoot selects the directory of the production .env file.
+// An empty directory uses geminiModel and does not open a file.
+func SetGeminiEnvRoot(dir string) {
+	geminiEnvRoot = dir
+}
+
+func geminiEndpoint() string {
+	model := activeGeminiModel()
+	if model == geminiModel {
+		return geminiURL
+	}
+	return "https://generativelanguage.googleapis.com/v1beta/models/" + url.PathEscape(model) + ":generateContent"
+}
+
+// activeGeminiModel reads GEMINI_MODEL from <root>/.env.
+// A missing file, a missing key, or a blank value uses geminiModel.
+// .env.example is not read.
+func activeGeminiModel() string {
+	if geminiEnvRoot == "" {
+		return geminiModel
+	}
+	value, ok := geminiModelValue(filepath.Join(geminiEnvRoot, ".env"))
+	value = strings.TrimSpace(value)
+	if !ok || value == "" {
+		return geminiModel
+	}
+	return value
+}
+
+func geminiModelValue(path string) (string, bool) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	found := false
+	value := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasSuffix(line, "\r") {
+			line = strings.TrimSuffix(line, "\r")
+		}
+		line = strings.TrimLeft(line, " \t\v\f")
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, val, ok := strings.Cut(line, "=")
+		if !ok || key != geminiModelKey {
+			continue
+		}
+		found = true
+		value = unquoteEnvValue(val)
+	}
+	return value, found
+}
+
+func unquoteEnvValue(val string) string {
+	if len(val) >= 2 {
+		last := val[len(val)-1]
+		if (val[0] == '"' && last == '"') || (val[0] == '\'' && last == '\'') {
+			return val[1 : len(val)-1]
+		}
+	}
+	return val
+}
 
 // geminiCall selects the stderr prefix for one Gemini request.
 type geminiCall int
@@ -413,7 +491,7 @@ func requestAnalysis(ctx context.Context, client *http.Client, key, prompt strin
 }
 
 func postGemini(ctx context.Context, client *http.Client, key string, payload []byte, call geminiCall) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, geminiURL, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, geminiEndpoint(), bytes.NewReader(payload))
 	if err != nil {
 		return nil, call.responseErr()
 	}

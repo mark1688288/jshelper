@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -1472,6 +1473,89 @@ The source field may be empty. The program replaces it.`
 			t.Fatalf("err %q", err)
 		}
 	})
+}
+
+func TestGeminiModelFromProductionEnv(t *testing.T) {
+	t.Cleanup(func() { SetGeminiEnvRoot("") })
+	dir := t.TempDir()
+	const secret = "client-secret-do-not-send"
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte("GEMINI_MODEL=from-example\nGOOGLE_OAUTH_CLIENT_SECRET="+secret+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, ".env")
+	writeEnv := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(envPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Chdir(dir)
+	writeEnv("GEMINI_MODEL=from-cwd\n")
+	SetGeminiEnvRoot("")
+	if geminiEndpoint() != geminiURL || activeGeminiModel() != geminiModel {
+		t.Fatal("unset root read .env")
+	}
+
+	SetGeminiEnvRoot(dir)
+	if err := os.Remove(envPath); err != nil {
+		t.Fatal(err)
+	}
+	if activeGeminiModel() != geminiModel || geminiEndpoint() != geminiURL {
+		t.Fatal("missing .env")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secret.env"), []byte("GEMINI_MODEL=from-link\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("secret.env", envPath); err != nil {
+		t.Fatal(err)
+	}
+	if activeGeminiModel() != geminiModel {
+		t.Fatal("followed .env symlink")
+	}
+	if err := os.Remove(envPath); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, body := range []string{
+		"GOOGLE_OAUTH_CLIENT_SECRET=" + secret + "\n",
+		"GEMINI_MODEL=\n",
+		"GEMINI_MODEL=   \n",
+		"GEMINI_MODEL=\"\"\n",
+		"# GEMINI_MODEL=from-comment\n",
+	} {
+		writeEnv(body)
+		if got := activeGeminiModel(); got != geminiModel || geminiEndpoint() != geminiURL {
+			t.Fatalf("body %q model %q", body, got)
+		}
+	}
+
+	writeEnv("GEMINI_MODEL=first\nexport GEMINI_MODEL=\"gemini-test-model\"\nGOOGLE_OAUTH_CLIENT_SECRET=" + secret + "\n")
+	if activeGeminiModel() != "gemini-test-model" {
+		t.Fatalf("model %q", activeGeminiModel())
+	}
+	endpoint := geminiEndpoint()
+	if endpoint != "https://generativelanguage.googleapis.com/v1beta/models/gemini-test-model:generateContent" || strings.Contains(endpoint, secret) || strings.Contains(endpoint, "from-example") {
+		t.Fatalf("endpoint %s", endpoint)
+	}
+
+	cleanKeyring(t)
+	const key = "gemini-test-key"
+	if err := StoreGeminiKey(key); err != nil {
+		t.Fatal(err)
+	}
+	blocks := []Block{{Heading: "What we offer", Text: "Medical insurance"}}
+	client, cap := testGeminiClient(t, http.StatusOK, geminiEnvelope(t, sectionMapping{Benefits: []string{"Medical insurance"}}))
+	if _, err := MapSections(context.Background(), phraseDoc(), blocks, client); err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(cap.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.String() != endpoint || u.RawQuery != "" || u.Host != "generativelanguage.googleapis.com" || strings.Contains(cap.url, key) || strings.Contains(cap.url, secret) || strings.Contains(cap.body, secret) {
+		t.Fatalf("url %s", cap.url)
+	}
 }
 
 func join(items []string) string {
