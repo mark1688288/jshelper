@@ -241,11 +241,6 @@ func runCreate(args []string, d deps) int {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
 	}
-	if err := d.writeCredentials(cfg); err != nil {
-		fmt.Fprintln(d.Stderr, err.Error())
-		return 1
-	}
-	fmt.Fprintln(d.Stderr, "docs-cli: wrote credentials.json")
 	tok, err := d.authorize(context.Background(), cfg, oauth.Options{Force: false, Stderr: d.Stderr})
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
@@ -324,11 +319,6 @@ func runCreateImport(d deps, titleSet, textSet, folderSet bool, titleFlag, folde
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
 	}
-	if err := d.writeCredentials(cfg); err != nil {
-		fmt.Fprintln(d.Stderr, err.Error())
-		return 1
-	}
-	fmt.Fprintln(d.Stderr, "docs-cli: wrote credentials.json")
 	tok, err := d.authorize(context.Background(), cfg, oauth.Options{Force: false, Stderr: d.Stderr})
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
@@ -438,11 +428,6 @@ func runUpload(args []string, d deps) int {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
 	}
-	if err := d.writeCredentials(cfg); err != nil {
-		fmt.Fprintln(d.Stderr, err.Error())
-		return 1
-	}
-	fmt.Fprintln(d.Stderr, "docs-cli: wrote credentials.json")
 	tok, err := d.authorize(context.Background(), cfg, oauth.Options{Force: false, Stderr: d.Stderr})
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
