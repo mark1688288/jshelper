@@ -1786,6 +1786,73 @@ func TestParseWorksWithoutEnv(t *testing.T) {
 	}
 }
 
+func TestParseUsesGeminiModelFromEnv(t *testing.T) {
+	const apiKey = "model-env-gemini-key"
+	const secret = "env-client-secret-value"
+	page := []byte(sampleJobHTML)
+	path := writeFile(t, "job.html", page)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte("GEMINI_MODEL=from-example\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, ".env")
+
+	requestURL := func(t *testing.T) string {
+		t.Helper()
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		cap := &geminiCapture{}
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"parse", "--html", path}, deps{
+			Stdin:        strings.NewReader(""),
+			Stdout:       &stdout,
+			Stderr:       &stderr,
+			Root:         dir,
+			GeminiClient: mappingClient(t, http.StatusOK, geminiReply(t, []string{"Medical insurance"}, []string{"Build tools"}, []string{"Go experience"}, []string{"Apply by form"}), cap),
+		})
+		if cap.url == "" {
+			t.Fatalf("exit %d stderr %q", code, stderr.String())
+		}
+		if strings.Contains(cap.url, apiKey) || strings.Contains(cap.url, secret) || strings.Contains(cap.body, secret) || strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
+			t.Fatalf("secret leaked url %s", cap.url)
+		}
+		return cap.url
+	}
+
+	t.Run("production value", func(t *testing.T) {
+		body := "GEMINI_MODEL=gemini-test-model\nGOOGLE_OAUTH_CLIENT_SECRET=" + secret + "\n"
+		if err := os.WriteFile(envPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := requestURL(t)
+		if !strings.Contains(got, "/models/gemini-test-model:generateContent") || strings.Contains(got, "gemini-3.1-flash-lite") || strings.Contains(got, "from-example") {
+			t.Fatalf("url %s", got)
+		}
+	})
+
+	t.Run("empty value", func(t *testing.T) {
+		if err := os.WriteFile(envPath, []byte("GEMINI_MODEL=\nGEMINI_MODEL=   \n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := requestURL(t)
+		if !strings.Contains(got, "/models/gemini-3.1-flash-lite:generateContent") || strings.Contains(got, "from-example") {
+			t.Fatalf("url %s", got)
+		}
+	})
+
+	t.Run("missing file ignores example", func(t *testing.T) {
+		if err := os.Remove(envPath); err != nil {
+			t.Fatal(err)
+		}
+		got := requestURL(t)
+		if !strings.Contains(got, "/models/gemini-3.1-flash-lite:generateContent") || strings.Contains(got, "from-example") {
+			t.Fatalf("url %s", got)
+		}
+	})
+}
+
 func TestGeminiKeyStoresInKeyring(t *testing.T) {
 	const apiKey = "tty-gemini-key-value"
 	const stdinKey = "stdin-secret-should-not-store"

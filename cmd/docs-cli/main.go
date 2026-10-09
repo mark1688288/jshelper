@@ -738,6 +738,8 @@ func (d deps) uploadJSON(ctx context.Context, cfg *config.Config, tok *oauth2.To
 }
 
 func runParse(args []string, d deps) int {
+	restore := bindGeminiEnvRoot(d)
+	defer restore()
 	fs := newFlagSet("parse", d.Stderr)
 	htmlFlag := fs.String("html", "", "saved job HTML file")
 	txtFlag := fs.String("txt", "", "job details text file")
@@ -1161,6 +1163,8 @@ func runGeminiKey(args []string, d deps) int {
 }
 
 func runAnalyze(args []string, d deps) int {
+	restore := bindGeminiEnvRoot(d)
+	defer restore()
 	fs := newFlagSet("analyze", d.Stderr)
 	jsonFlag := fs.String("json", "", "section JSON from parse")
 	batch := fs.Bool("batch", false, "analyze every .json file in ./batch/jobads/parsed")
@@ -1826,6 +1830,15 @@ func terminalOrNil(d deps) (config.TTY, func()) {
 		return nil, func() {}
 	}
 	return tty, closeTTY
+}
+
+func bindGeminiEnvRoot(d deps) func() {
+	root, err := commandRoot(d)
+	if err != nil {
+		return func() {}
+	}
+	jobad.SetGeminiEnvRoot(root)
+	return func() { jobad.SetGeminiEnvRoot("") }
 }
 
 func commandRoot(d deps) (string, error) {
