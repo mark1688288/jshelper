@@ -43,6 +43,7 @@ var (
 	errGeminiResponse     = errors.New("docs-cli: gemini mapping rejected: response")
 	errGeminiBlocks       = errors.New("docs-cli: gemini mapping rejected: blocks")
 
+	errGeminiKeyMissing       = errors.New("docs-cli: gemini api key is not in the keyring")
 	errGeminiAnalysisTimeout  = errors.New("docs-cli: gemini analysis rejected: timeout")
 	errGeminiAnalysisHTTP     = errors.New("docs-cli: gemini analysis rejected: http")
 	errGeminiAnalysisResponse = errors.New("docs-cli: gemini analysis rejected: response")
