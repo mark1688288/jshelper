@@ -37,6 +37,7 @@ commands:
   parse --batch
   gemini-key
   analyze --json PATH
+  analyze --batch
   draft --json PATH --template PATH --cv PATH [--pdf NAME]
   upload [--folder FOLDER] PATH [PATH ...]
 
@@ -57,6 +58,7 @@ gemini-key stores the Gemini API key in the keyring. The key is not a flag.
 
 analyze:
   --json PATH      section JSON from parse
+  --batch          analyze every .json file in ./batch/jobads/parsed
 
 draft:
   --json PATH      section JSON from parse
@@ -81,6 +83,8 @@ const (
 	errHTMLTooLarge      = "docs-cli: html exceeds 2 MiB"
 	errTxtTooLarge       = "docs-cli: txt exceeds 2 MiB"
 	errNoBatchTxt        = "docs-cli: no txt files: batch/jobads"
+	errNoBatchJSON       = "docs-cli: no json files: batch/jobads/parsed"
+	errParsedDirMissing  = "docs-cli: parsed directory is missing: batch/jobads/parsed"
 	errJSONTooLarge      = "docs-cli: json exceeds 1 MiB"
 	errJobAdDetails      = "docs-cli: jobAdDetails not found"
 	errGeminiKeyMissing  = "docs-cli: gemini api key is not in the keyring"
@@ -1157,6 +1161,7 @@ func runGeminiKey(args []string, d deps) int {
 func runAnalyze(args []string, d deps) int {
 	fs := newFlagSet("analyze", d.Stderr)
 	jsonFlag := fs.String("json", "", "section JSON from parse")
+	batch := fs.Bool("batch", false, "analyze every .json file in ./batch/jobads/parsed")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -1164,12 +1169,23 @@ func runAnalyze(args []string, d deps) int {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
 	}
-	jsonSet := false
+	jsonSet, batchSet := false, false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "json" {
+		switch f.Name {
+		case "json":
 			jsonSet = true
+		case "batch":
+			batchSet = true
 		}
 	})
+	// --batch cannot be combined with --json. --batch=false is not the batch path.
+	if batchSet && jsonSet {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	if batchSet && *batch {
+		return runAnalyzeBatch(d)
+	}
 	if !jsonSet || *jsonFlag == "" {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
@@ -1195,6 +1211,179 @@ func runAnalyze(args []string, d deps) int {
 		return 1
 	}
 	if err := writeIndentedJSON(d.Stdout, analysis); err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	return 0
+}
+
+// runAnalyzeBatch analyzes each one-level .json file in ./batch/jobads/parsed.
+// parsed must already exist. analyzed is created at mode 0700 when it is missing.
+// An existing analyzed directory keeps its mode. A file or symlink is not replaced.
+func runAnalyzeBatch(d deps) int {
+	wd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	parsedRel := filepath.Join("batch", "jobads", "parsed")
+	analyzedRel := filepath.Join("batch", "jobads", "analyzed")
+	parsed := filepath.Join(wd, parsedRel)
+	analyzed := filepath.Join(wd, analyzedRel)
+
+	info, err := os.Lstat(parsed)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintln(d.Stderr, errParsedDirMissing)
+			return 1
+		}
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	if !info.IsDir() {
+		fmt.Fprintf(d.Stderr, "docs-cli: not a directory: %s\n", parsedRel)
+		return 1
+	}
+
+	ainfo, err := os.Lstat(analyzed)
+	switch {
+	case os.IsNotExist(err):
+		// Only this directory. Do not create batch, jobads, or parsed.
+		if err := os.Mkdir(analyzed, 0o700); err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		if err := os.Chmod(analyzed, 0o700); err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+	case err != nil:
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	case !ainfo.IsDir():
+		fmt.Fprintf(d.Stderr, "docs-cli: not a directory: %s\n", analyzedRel)
+		return 1
+	}
+
+	entries, err := os.ReadDir(parsed)
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	var names []string
+	for _, ent := range entries {
+		if strings.EqualFold(filepath.Ext(ent.Name()), ".json") {
+			names = append(names, ent.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		fmt.Fprintln(d.Stderr, errNoBatchJSON)
+		return 1
+	}
+
+	type analyzeFile struct {
+		name        string
+		src         string
+		rel         string
+		analysisDst string
+		jsonDst     string
+		jsonRel     string
+	}
+	files := make([]analyzeFile, 0, len(names))
+	for _, name := range names {
+		rel := filepath.Join(parsedRel, name)
+		src := filepath.Join(parsed, name)
+		info, err := os.Lstat(src)
+		if err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		if !info.Mode().IsRegular() {
+			fmt.Fprintf(d.Stderr, "docs-cli: not a regular file: %s\n", rel)
+			return 1
+		}
+		if info.Size() > maxJSONBytes {
+			fmt.Fprintf(d.Stderr, "docs-cli: json exceeds 1 MiB: %s\n", rel)
+			return 1
+		}
+		ext := filepath.Ext(name)
+		stem := strings.TrimSuffix(name, ext)
+		if stem == "" {
+			fmt.Fprintf(d.Stderr, "docs-cli: not a json file: %s\n", rel)
+			return 1
+		}
+		analysisName := stem + "-analysis.json"
+		analysisRel := filepath.Join(analyzedRel, analysisName)
+		jsonRel := filepath.Join(analyzedRel, name)
+		analysisDst := filepath.Join(analyzed, analysisName)
+		jsonDst := filepath.Join(analyzed, name)
+		if code := rejectAnalyzedDest(d, analysisDst, analysisRel); code != 0 {
+			return code
+		}
+		if code := rejectAnalyzedDest(d, jsonDst, jsonRel); code != 0 {
+			return code
+		}
+		files = append(files, analyzeFile{
+			name:        name,
+			src:         src,
+			rel:         rel,
+			analysisDst: analysisDst,
+			jsonDst:     jsonDst,
+			jsonRel:     jsonRel,
+		})
+	}
+
+	for _, file := range files {
+		raw, err := readLimitedFile(file.src, maxJSONBytes)
+		if errors.Is(err, errJSONTooBig) {
+			fmt.Fprintf(d.Stderr, "docs-cli: json exceeds 1 MiB: %s\n", file.rel)
+			return 1
+		}
+		if err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		var doc jobad.Document
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		analysis, err := jobad.Analyze(doc, d.GeminiClient)
+		if err != nil {
+			fmt.Fprintln(d.Stderr, err.Error())
+			return 1
+		}
+		abs, err := filepath.Abs(file.analysisDst)
+		if err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		if err := writeExclusiveJSON(file.analysisDst, analysis); err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		if code := rejectAnalyzedDest(d, file.jsonDst, file.jsonRel); code != 0 {
+			_ = os.Remove(file.analysisDst)
+			return code
+		}
+		if err := os.Rename(file.src, file.jsonDst); err != nil {
+			_ = os.Remove(file.analysisDst)
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		fmt.Fprintln(d.Stdout, abs)
+	}
+	return 0
+}
+
+func rejectAnalyzedDest(d deps, path, rel string) int {
+	_, err := os.Lstat(path)
+	if err == nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: analyzed file already exists: %s\n", rel)
+		return 1
+	}
+	if !os.IsNotExist(err) {
 		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 		return 1
 	}
