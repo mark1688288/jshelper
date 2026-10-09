@@ -4200,11 +4200,19 @@ func TestAnalyzeBatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		roleSVG, err := filepath.Abs(filepath.Join(analyzed, "Role-tech.svg"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		aAbs, err := filepath.Abs(filepath.Join(analyzed, "a-analysis.json"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if stdout != roleAbs+"\n"+aAbs+"\n" {
+		aSVG, err := filepath.Abs(filepath.Join(analyzed, "a-tech.svg"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stdout != roleAbs+"\n"+roleSVG+"\n"+aAbs+"\n"+aSVG+"\n" {
 			t.Fatalf("stdout %q", stdout)
 		}
 		if strings.Contains(stdout, "must_have") || strings.Contains(stdout, "COMPANY-TOKEN") {
@@ -4216,6 +4224,20 @@ func TestAnalyzeBatch(t *testing.T) {
 		assertFileBytes(t, filepath.Join(analyzed, "a.json"), aBody)
 		assertPerm(t, filepath.Join(analyzed, "Role-analysis.json"), 0o600)
 		assertPerm(t, filepath.Join(analyzed, "a-analysis.json"), 0o600)
+		assertPerm(t, filepath.Join(analyzed, "Role-tech.svg"), 0o600)
+		assertPerm(t, filepath.Join(analyzed, "a-tech.svg"), 0o600)
+		for _, path := range []string{
+			filepath.Join(analyzed, "Role-tech.svg"),
+			filepath.Join(analyzed, "a-tech.svg"),
+		} {
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(got, []byte(`<text class="empty">(none)</text>`)) || bytes.Contains(got, []byte("COMPANY-TOKEN")) || bytes.Contains(got, []byte(apiKey)) {
+				t.Fatalf("%s %s", path, got)
+			}
+		}
 		assertAbsent(t, filepath.Join(parsed, "Role.JSON"))
 		assertAbsent(t, filepath.Join(parsed, "a.json"))
 		assertFileBytes(t, filepath.Join(parsed, "keep.txt"), keep)
@@ -4608,6 +4630,30 @@ func TestAnalyzeBatch(t *testing.T) {
 		if len(calls) != 0 {
 			t.Fatalf("calls %#v", calls)
 		}
+
+		dir = t.TempDir()
+		parsed = makeParsed(t, dir)
+		analyzed = filepath.Join(dir, "batch", "jobads", "analyzed")
+		if err := os.Mkdir(analyzed, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeAt(t, filepath.Join(parsed, "a.json"), body)
+		marker = []byte("already-svg")
+		writeAt(t, filepath.Join(analyzed, "a-tech.svg"), marker)
+		stdout, stderr, code = runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want = "docs-cli: analyzed file already exists: " + filepath.Join("batch", "jobads", "analyzed", "a-tech.svg") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("svg dest exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(analyzed, "a-tech.svg"), marker)
+		assertFileBytes(t, filepath.Join(parsed, "a.json"), body)
+		assertAbsent(t, filepath.Join(analyzed, "a-analysis.json"))
+		assertAbsent(t, filepath.Join(analyzed, "a.json"))
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
 	})
 
 	t.Run("dot json name", func(t *testing.T) {
@@ -4682,14 +4728,24 @@ func TestAnalyzeBatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code != 1 || stdout != aAbs+"\n" || stderr != "docs-cli: fm: not licensed\n" || hits != 0 {
+		aSVG, err := filepath.Abs(filepath.Join(analyzed, "a-tech.svg"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code != 1 || stdout != aAbs+"\n"+aSVG+"\n" || stderr != "docs-cli: fm: not licensed\n" || hits != 0 {
 			t.Fatalf("exit %d hits %d stdout %q stderr %q", code, hits, stdout, stderr)
 		}
 		assertFileBytes(t, filepath.Join(analyzed, "a-analysis.json"), analysisFileBytes(t, model))
 		assertFileBytes(t, filepath.Join(analyzed, "a.json"), aBody)
+		svgBody, err := os.ReadFile(filepath.Join(analyzed, "a-tech.svg"))
+		if err != nil || !bytes.Contains(svgBody, []byte(`<text class="empty">(none)</text>`)) {
+			t.Fatalf("svg %q err %v", svgBody, err)
+		}
+		assertPerm(t, filepath.Join(analyzed, "a-tech.svg"), 0o600)
 		assertFileBytes(t, filepath.Join(parsed, "b.json"), bBody)
 		assertAbsent(t, filepath.Join(parsed, "a.json"))
 		assertAbsent(t, filepath.Join(analyzed, "b-analysis.json"))
+		assertAbsent(t, filepath.Join(analyzed, "b-tech.svg"))
 		assertAbsent(t, filepath.Join(analyzed, "b.json"))
 		if len(calls) != 3 {
 			t.Fatalf("calls %#v", calls)
@@ -4747,10 +4803,182 @@ func TestAnalyzeBatch(t *testing.T) {
 		}
 		assertAbsent(t, filepath.Join(dir, "batch"))
 		assertFileBytes(t, path, body)
+		svgPath := filepath.Join(dir, "job-tech.svg")
+		svgBody, err := os.ReadFile(svgPath)
+		if err != nil || !bytes.Contains(svgBody, []byte(`<text class="empty">(none)</text>`)) {
+			t.Fatalf("svg %q err %v", svgBody, err)
+		}
+		assertPerm(t, svgPath, 0o600)
+		if strings.Contains(stdout, "job-tech.svg") {
+			t.Fatalf("stdout printed the diagram path %q", stdout)
+		}
 		if len(calls) != 2 {
 			t.Fatalf("calls %#v", calls)
 		}
 		assertRefreshUntouched(t)
+	})
+}
+
+func TestAnalyzeTechDiagram(t *testing.T) {
+	model := `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"Java","level":"must","applies_to":"Backend"},{"name":"Spring Boot","level":"must","applies_to":"Backend"},{"name":"Salesforce","level":"advantage","applies_to":"Integration"}],"soft_skills":[]}`
+	doc := batchJob("Know Go")
+
+	t.Run("writes svg beside json", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		body := jobFileBytes(t, doc)
+		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: model + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 0 || stderr != "" || stdout != string(analysisFileBytes(t, model)) {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		if strings.Contains(stdout, "jd-tech.svg") || strings.Contains(stdout, "Java / Spring Boot") {
+			t.Fatalf("stdout %q", stdout)
+		}
+		svgPath := filepath.Join(dir, "jd-tech.svg")
+		svg, err := os.ReadFile(svgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertPerm(t, svgPath, 0o600)
+		for _, want := range []string{"Java / Spring Boot", ">Backend</text>", `class="must"`, "Salesforce", ">Integration</text>", `class="advantage"`} {
+			if !bytes.Contains(svg, []byte(want)) {
+				t.Fatalf("missing %s\n%s", want, svg)
+			}
+		}
+		assertFileBytes(t, path, body)
+		assertAbsent(t, filepath.Join(dir, "batch"))
+		if len(calls) != 2 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("existing file skips fm", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		body := jobFileBytes(t, doc)
+		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
+		svgPath := filepath.Join(dir, "jd-tech.svg")
+		marker := []byte("already-svg")
+		writeAt(t, svgPath, marker)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: model + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: tech diagram already exists: " + svgPath + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, svgPath, marker)
+		assertFileBytes(t, path, body)
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("existing symlink skips fm", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		body := jobFileBytes(t, doc)
+		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
+		marker := []byte("symlink-svg")
+		target := writeAt(t, filepath.Join(dir, "marker.svg"), marker)
+		svgPath := filepath.Join(dir, "jd-tech.svg")
+		if err := os.Symlink(target, svgPath); err != nil {
+			t.Fatal(err)
+		}
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: model + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: tech diagram already exists: " + svgPath + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		got, err := os.Readlink(svgPath)
+		if err != nil || got != target {
+			t.Fatalf("symlink %q err %v", got, err)
+		}
+		assertFileBytes(t, target, marker)
+		assertFileBytes(t, path, body)
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("existing directory skips fm", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		body := jobFileBytes(t, doc)
+		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
+		svgPath := filepath.Join(dir, "jd-tech.svg")
+		if err := os.Mkdir(svgPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: model + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: tech diagram already exists: " + svgPath + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		info, err := os.Lstat(svgPath)
+		if err != nil || !info.IsDir() {
+			t.Fatalf("diagram path %v err %v", info, err)
+		}
+		assertFileBytes(t, path, body)
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("fm failure writes no svg", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		body := jobFileBytes(t, doc)
+		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stderr: "not licensed\n", code: 1})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: fm: not licensed\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertAbsent(t, filepath.Join(dir, "jd-tech.svg"))
+		assertFileBytes(t, path, body)
+		if len(calls) != 1 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("dot json name", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		body := []byte(`{"requirements":["Know Go"]}`)
+		path := writeAt(t, filepath.Join(dir, ".json"), body)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: model + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: not a json file: " + path + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, path, body)
+		assertAbsent(t, filepath.Join(dir, "-tech.svg"))
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
 	})
 }
 

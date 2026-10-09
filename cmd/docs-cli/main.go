@@ -1205,9 +1205,32 @@ func runAnalyze(args []string, d deps) int {
 		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 		return 1
 	}
+	base := filepath.Base(*jsonFlag)
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	if stem == "" {
+		fmt.Fprintf(d.Stderr, "docs-cli: not a json file: %s\n", *jsonFlag)
+		return 1
+	}
+	diagramPath := filepath.Join(filepath.Dir(*jsonFlag), stem+"-tech.svg")
+	if code := rejectTechDiagram(d, diagramPath); code != 0 {
+		return code
+	}
 	analysis, err := jobad.Analyze(doc, d.GeminiClient)
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	svg, err := jobad.TechDiagram(analysis)
+	if err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	if err := writeExclusiveFile(diagramPath, svg); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			fmt.Fprintf(d.Stderr, "docs-cli: tech diagram already exists: %s\n", diagramPath)
+			return 1
+		}
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 		return 1
 	}
 	if err := writeIndentedJSON(d.Stdout, analysis); err != nil {
@@ -1289,6 +1312,8 @@ func runAnalyzeBatch(d deps) int {
 		analysisDst string
 		jsonDst     string
 		jsonRel     string
+		svgDst      string
+		svgRel      string
 	}
 	files := make([]analyzeFile, 0, len(names))
 	for _, name := range names {
@@ -1316,12 +1341,18 @@ func runAnalyzeBatch(d deps) int {
 		analysisName := stem + "-analysis.json"
 		analysisRel := filepath.Join(analyzedRel, analysisName)
 		jsonRel := filepath.Join(analyzedRel, name)
+		svgName := stem + "-tech.svg"
+		svgRel := filepath.Join(analyzedRel, svgName)
 		analysisDst := filepath.Join(analyzed, analysisName)
 		jsonDst := filepath.Join(analyzed, name)
+		svgDst := filepath.Join(analyzed, svgName)
 		if code := rejectAnalyzedDest(d, analysisDst, analysisRel); code != 0 {
 			return code
 		}
 		if code := rejectAnalyzedDest(d, jsonDst, jsonRel); code != 0 {
+			return code
+		}
+		if code := rejectAnalyzedDest(d, svgDst, svgRel); code != 0 {
 			return code
 		}
 		files = append(files, analyzeFile{
@@ -1331,6 +1362,8 @@ func runAnalyzeBatch(d deps) int {
 			analysisDst: analysisDst,
 			jsonDst:     jsonDst,
 			jsonRel:     jsonRel,
+			svgDst:      svgDst,
+			svgRel:      svgRel,
 		})
 	}
 
@@ -1354,7 +1387,17 @@ func runAnalyzeBatch(d deps) int {
 			fmt.Fprintln(d.Stderr, err.Error())
 			return 1
 		}
+		svg, err := jobad.TechDiagram(analysis)
+		if err != nil {
+			fmt.Fprintln(d.Stderr, err.Error())
+			return 1
+		}
 		abs, err := filepath.Abs(file.analysisDst)
+		if err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		svgAbs, err := filepath.Abs(file.svgDst)
 		if err != nil {
 			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 			return 1
@@ -1363,16 +1406,28 @@ func runAnalyzeBatch(d deps) int {
 			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 			return 1
 		}
+		if err := writeExclusiveFile(file.svgDst, svg); err != nil {
+			_ = os.Remove(file.analysisDst)
+			if errors.Is(err, os.ErrExist) {
+				fmt.Fprintf(d.Stderr, "docs-cli: analyzed file already exists: %s\n", file.svgRel)
+				return 1
+			}
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
 		if code := rejectAnalyzedDest(d, file.jsonDst, file.jsonRel); code != 0 {
 			_ = os.Remove(file.analysisDst)
+			_ = os.Remove(file.svgDst)
 			return code
 		}
 		if err := os.Rename(file.src, file.jsonDst); err != nil {
 			_ = os.Remove(file.analysisDst)
+			_ = os.Remove(file.svgDst)
 			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 			return 1
 		}
 		fmt.Fprintln(d.Stdout, abs)
+		fmt.Fprintln(d.Stdout, svgAbs)
 	}
 	return 0
 }
@@ -1388,6 +1443,36 @@ func rejectAnalyzedDest(d deps, path, rel string) int {
 		return 1
 	}
 	return 0
+}
+
+func rejectTechDiagram(d deps, path string) int {
+	_, err := os.Lstat(path)
+	if err == nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: tech diagram already exists: %s\n", path)
+		return 1
+	}
+	if !os.IsNotExist(err) {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	return 0
+}
+
+func writeExclusiveFile(path string, body []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(body)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(path)
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	return nil
 }
 
 // errDraftsNotDirectory is returned when ./drafts exists and is not a directory.
