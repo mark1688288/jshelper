@@ -1080,6 +1080,146 @@ func TestAnalyzeGeminiRejects(t *testing.T) {
 	})
 }
 
+func TestAnalyzeGeminiDirect(t *testing.T) {
+	const key = "gemini-analysis-key"
+	const model = `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"Go","level":"must","applies_to":null}],"soft_skills":[]}`
+	doc := sampleAnalysisDoc()
+	doc.Header.Company = "COMPANY-TOKEN"
+	prompt, err := PromptText(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	succeedFM := func(t *testing.T) *int {
+		t.Helper()
+		calls := 0
+		SetFMExecForTest(func([]string) ([]byte, []byte, int) {
+			calls++
+			return []byte(model), nil, 0
+		})
+		t.Cleanup(restoreFMStub)
+		return &calls
+	}
+
+	t.Run("success", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		calls := succeedFM(t)
+		client, cap := testGeminiClient(t, http.StatusOK, geminiTextEnvelope(t, model))
+		got, err := AnalyzeGemini(doc, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *calls != 0 {
+			t.Fatalf("fm calls %d", *calls)
+		}
+		if len(got.MustHave) != 1 || got.MustHave[0] != "Know Go" {
+			t.Fatalf("analysis %#v", got)
+		}
+		assertAnalysisRequest(t, cap, key, prompt)
+	})
+
+	t.Run("missing key", func(t *testing.T) {
+		cleanKeyring(t)
+		calls := succeedFM(t)
+		hits := 0
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			hits++
+			return nil, errors.New("gemini called")
+		})}
+		_, err := AnalyzeGemini(doc, client)
+		if err == nil || err.Error() != errGeminiKeyMissing.Error() || hits != 0 || *calls != 0 {
+			t.Fatalf("err %v hits %d calls %d", err, hits, *calls)
+		}
+	})
+
+	t.Run("invalid key", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := keyring.Set(keyringService, geminiAccount, `{"api_key":""}`); err != nil {
+			t.Fatal(err)
+		}
+		calls := succeedFM(t)
+		hits := 0
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			hits++
+			return nil, errors.New("gemini called")
+		})}
+		_, err := AnalyzeGemini(doc, client)
+		if err == nil || err.Error() != errGeminiKeyInvalid.Error() || hits != 0 || *calls != 0 {
+			t.Fatalf("err %v hits %d calls %d", err, hits, *calls)
+		}
+	})
+
+	t.Run("keyring unavailable", func(t *testing.T) {
+		const secret = "keyring-boom-secret"
+		keyring.MockInitWithError(errors.New(secret))
+		t.Cleanup(func() { keyring.MockInit() })
+		calls := succeedFM(t)
+		hits := 0
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			hits++
+			return nil, errors.New("gemini called")
+		})}
+		_, err := AnalyzeGemini(doc, client)
+		if err == nil || err.Error() != errKeyringUnavailable.Error() || hits != 0 || *calls != 0 || strings.Contains(err.Error(), secret) {
+			t.Fatalf("err %v hits %d calls %d", err, hits, *calls)
+		}
+	})
+
+	t.Run("empty requirements", func(t *testing.T) {
+		const secret = "do-not-read-gemini"
+		keyring.MockInitWithError(errors.New(secret))
+		t.Cleanup(func() { keyring.MockInit() })
+		calls := succeedFM(t)
+		hits := 0
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			hits++
+			return nil, errors.New("gemini called")
+		})}
+		for _, empty := range []Document{{}, {Requirements: []string{}}, {Requirements: []string{"person@example.com"}}} {
+			got, err := AnalyzeGemini(empty, client)
+			if got.MustHave != nil || !errors.Is(err, ErrRequirementsEmpty) || strings.Contains(err.Error(), "keyring") {
+				t.Fatalf("doc %#v got %#v err %v", empty.Requirements, got, err)
+			}
+		}
+		if hits != 0 || *calls != 0 {
+			t.Fatalf("hits %d calls %d", hits, *calls)
+		}
+	})
+
+	t.Run("bad level", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		calls := succeedFM(t)
+		bad := strings.Replace(model, `"level":"must"`, `"level":"expert"`, 1)
+		client, _ := testGeminiClient(t, http.StatusOK, geminiTextEnvelope(t, bad))
+		_, err := AnalyzeGemini(doc, client)
+		if err == nil || err.Error() != errGeminiAnalysisResponse.Error() || *calls != 0 || strings.Contains(err.Error(), "fm:") {
+			t.Fatalf("err %v calls %d", err, *calls)
+		}
+	})
+
+	t.Run("status", func(t *testing.T) {
+		cleanKeyring(t)
+		if err := StoreGeminiKey(key); err != nil {
+			t.Fatal(err)
+		}
+		calls := succeedFM(t)
+		const detail = "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."
+		body := `{"error":{"status":"UNAVAILABLE","message":"` + detail + `"}}`
+		client, _ := testGeminiClient(t, http.StatusServiceUnavailable, body)
+		_, err := AnalyzeGemini(doc, client)
+		want := "docs-cli: gemini analysis rejected: status 503\n" +
+			"docs-cli: gemini analysis rejected: UNAVAILABLE: " + detail
+		if err == nil || err.Error() != want || *calls != 0 || strings.Contains(err.Error(), "docs-cli: fm:") || strings.Contains(err.Error(), key) {
+			t.Fatalf("err %q calls %d", err, *calls)
+		}
+	})
+}
+
 func geminiTextEnvelope(t *testing.T, text string) string {
 	t.Helper()
 	outer := map[string]any{

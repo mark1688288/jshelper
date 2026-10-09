@@ -36,8 +36,8 @@ commands:
   parse --txt PATH
   parse --batch
   gemini-key
-  analyze --json PATH
-  analyze --batch
+  analyze --json PATH [--gemini]
+  analyze --batch [--gemini]
   draft --json PATH --template PATH --cv PATH [--pdf NAME]
   upload [--folder FOLDER] PATH [PATH ...]
 
@@ -59,6 +59,7 @@ gemini-key stores the Gemini API key in the keyring. The key is not a flag.
 analyze:
   --json PATH      section JSON from parse
   --batch          analyze every .json file in ./batch/jobads/parsed
+  --gemini         skip the on-device model and call Gemini
 
 draft:
   --json PATH      section JSON from parse
@@ -125,8 +126,9 @@ type deps struct {
 	CreateDocument      func(ctx context.Context, title, body, folderID string, insertIndex int64) (string, error)
 	ImportPDF           func(ctx context.Context, title, folderID string, pdf []byte) (string, error)
 	UploadJSON          func(ctx context.Context, folderID string, files []docs.JSONFile) ([]string, error)
-	// GeminiClient is the HTTP client for section mapping, autoparse, and analyze
-	// when fm fails. Nil uses the default client. Tests pass a client that does not call Gemini.
+	// GeminiClient is the HTTP client for section mapping, autoparse, analyze
+	// when fm fails, and analyze --gemini. Nil uses the default client.
+	// Tests pass a client that does not call Gemini.
 	GeminiClient *http.Client
 }
 
@@ -1162,6 +1164,7 @@ func runAnalyze(args []string, d deps) int {
 	fs := newFlagSet("analyze", d.Stderr)
 	jsonFlag := fs.String("json", "", "section JSON from parse")
 	batch := fs.Bool("batch", false, "analyze every .json file in ./batch/jobads/parsed")
+	gemini := fs.Bool("gemini", false, "skip the on-device model and call Gemini")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -1184,7 +1187,7 @@ func runAnalyze(args []string, d deps) int {
 		return 2
 	}
 	if batchSet && *batch {
-		return runAnalyzeBatch(d)
+		return runAnalyzeBatch(d, *gemini)
 	}
 	if !jsonSet || *jsonFlag == "" {
 		fmt.Fprint(d.Stderr, usageText)
@@ -1219,7 +1222,7 @@ func runAnalyze(args []string, d deps) int {
 	if code := rejectTechDistribution(d, distPath); code != 0 {
 		return code
 	}
-	analysis, err := jobad.Analyze(doc, d.GeminiClient)
+	analysis, err := analyzeDocument(doc, d, *gemini)
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
@@ -1261,7 +1264,7 @@ func runAnalyze(args []string, d deps) int {
 // runAnalyzeBatch analyzes each one-level .json file in ./batch/jobads/parsed.
 // parsed must already exist. analyzed is created at mode 0700 when it is missing.
 // An existing analyzed directory keeps its mode. A file or symlink is not replaced.
-func runAnalyzeBatch(d deps) int {
+func runAnalyzeBatch(d deps, gemini bool) int {
 	wd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
@@ -1410,7 +1413,7 @@ func runAnalyzeBatch(d deps) int {
 			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 			return 1
 		}
-		analysis, err := jobad.Analyze(doc, d.GeminiClient)
+		analysis, err := analyzeDocument(doc, d, gemini)
 		if err != nil {
 			fmt.Fprintln(d.Stderr, err.Error())
 			return 1
@@ -1482,6 +1485,13 @@ func runAnalyzeBatch(d deps) int {
 		fmt.Fprintln(d.Stdout, distAbs)
 	}
 	return 0
+}
+
+func analyzeDocument(doc jobad.Document, d deps, gemini bool) (jobad.Analysis, error) {
+	if gemini {
+		return jobad.AnalyzeGemini(doc, d.GeminiClient)
+	}
+	return jobad.Analyze(doc, d.GeminiClient)
 }
 
 func rejectAnalyzedDest(d deps, path, rel string) int {

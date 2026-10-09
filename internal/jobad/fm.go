@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+
+	"github.com/zalando/go-keyring"
 )
 
 // fmPath is the on-device Foundation Models CLI.
@@ -92,6 +94,28 @@ func Analyze(doc Document, client *http.Client) (Analysis, error) {
 		return analyzeWithGemini(text, client, err)
 	}
 	return ParseAnalysis(stdout)
+}
+
+// AnalyzeGemini asks Gemini for an Analysis and does not call fm.
+// The Gemini API key must already be stored. A missing key is
+// errGeminiKeyMissing. AnalyzeGemini does not prompt and does not write
+// the keyring. An empty requirements list returns ErrRequirementsEmpty
+// and does not read the key. A Gemini failure is not retried with fm.
+// client nil uses the default Gemini HTTP client. Tests pass a client
+// that does not call Gemini.
+func AnalyzeGemini(doc Document, client *http.Client) (Analysis, error) {
+	text, err := PromptText(doc)
+	if err != nil {
+		return Analysis{}, err
+	}
+	key, err := LoadGeminiKey()
+	if err != nil {
+		if errors.Is(err, keyring.ErrNotFound) {
+			return Analysis{}, errGeminiKeyMissing
+		}
+		return Analysis{}, err
+	}
+	return requestAnalysis(context.Background(), client, key, text)
 }
 
 func analyzeWithGemini(text string, client *http.Client, fmErr error) (Analysis, error) {

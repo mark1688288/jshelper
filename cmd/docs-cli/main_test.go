@@ -3994,6 +3994,444 @@ func TestAnalyzeNoKeyDoesNotCallGemini(t *testing.T) {
 	}
 }
 
+func TestAnalyzeWithGeminiFlag(t *testing.T) {
+	const apiKey = "analyze-gemini-key"
+	const company = "COMPANY-TOKEN"
+	model := `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"R&D","level":"must","applies_to":"For Frontend"}],"soft_skills":[]}`
+	doc := jobad.Document{
+		Source: "source-token-9f3a.html",
+		Header: jobad.Header{
+			TitleBlock:     "System Analyst",
+			Company:        company,
+			Location:       "LOCATION-TOKEN",
+			WorkType:       "WORKTYPE-TOKEN",
+			Classification: "CLASS-TOKEN",
+		},
+		Benefits:     []string{"Medical person@example.com"},
+		Requirements: []string{"Know Go"},
+		Trailer:      []string{"TRAILER-SENTINEL"},
+	}
+	want := string(analysisFileBytes(t, model))
+
+	t.Run("writes analysis without fm", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		body := jobFileBytes(t, doc)
+		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: `{"must_have":["FROM-FM"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[],"soft_skills":[]}`})
+		hits := 0
+		cap := &geminiCapture{}
+		tty := &fakeTTY{terminal: true, secrets: []string{apiKey}}
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path, "--gemini"}, deps{
+			TTY:          tty,
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, model), &hits, cap),
+		})
+		if code != 0 || stderr != "" || stdout != want {
+			t.Fatalf("exit %d stderr %q stdout\n%s", code, stderr, stdout)
+		}
+		if hits != 1 || len(calls) != 0 || len(tty.prompts) != 0 {
+			t.Fatalf("hits %d calls %#v prompts %q", hits, calls, tty.prompts)
+		}
+		if strings.Contains(stdout, "FROM-FM") || strings.Contains(stdout, "jd-tech.md") || strings.Contains(stdout, `\u0026`) {
+			t.Fatalf("stdout %s", stdout)
+		}
+		for _, banned := range []string{apiKey, company, "LOCATION-TOKEN", "WORKTYPE-TOKEN", "CLASS-TOKEN", "TRAILER-SENTINEL", "source-token-9f3a.html", "person@example.com"} {
+			if strings.Contains(cap.body, banned) || strings.Contains(cap.url, banned) {
+				t.Fatalf("request contains %q\n%s", banned, cap.body)
+			}
+		}
+		if cap.header.Get("x-goog-api-key") != apiKey || cap.header.Get("Authorization") != "" {
+			t.Fatalf("header %#v", cap.header)
+		}
+		diagram, err := os.ReadFile(filepath.Join(dir, "jd-tech.md"))
+		if err != nil || !bytes.Contains(diagram, []byte("flowchart LR")) || !bytes.Contains(diagram, []byte("R&D")) {
+			t.Fatalf("diagram %q err %v", diagram, err)
+		}
+		assertPerm(t, filepath.Join(dir, "jd-tech.md"), 0o600)
+		assertPerm(t, filepath.Join(dir, "jd-tech-dist.md"), 0o600)
+		assertAbsent(t, filepath.Join(dir, "jd-tech.svg"))
+		assertAbsent(t, filepath.Join(dir, "batch"))
+		assertFileBytes(t, path, body)
+		assertRefreshUntouched(t)
+		assertNoSecret(t, stdout, stderr, apiKey)
+	})
+
+	t.Run("false still uses fm", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		fmModel := `{"must_have":["FROM-FM"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[],"soft_skills":[]}`
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: fmModel + "\n"})
+		hits := 0
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--gemini=false", "--json", path}, deps{
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, model), &hits, &geminiCapture{}),
+		})
+		if code != 0 || stderr != "" || hits != 0 || len(calls) != 2 || !strings.Contains(stdout, "FROM-FM") || strings.Contains(stdout, "Know Go") {
+			t.Fatalf("exit %d hits %d calls %d stdout %s stderr %q", code, hits, len(calls), stdout, stderr)
+		}
+	})
+
+	t.Run("missing key", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: model})
+		hits := 0
+		tty := &fakeTTY{terminal: true, secrets: []string{"should-not-ask"}}
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--gemini", "--json", path}, deps{
+			Stdin:        strings.NewReader("should-not-ask\n"),
+			TTY:          tty,
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, model), &hits, &geminiCapture{}),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: gemini api key is not in the keyring\n" || hits != 0 || len(calls) != 0 || len(tty.prompts) != 0 {
+			t.Fatalf("exit %d hits %d calls %#v prompts %q stdout %q stderr %q", code, hits, calls, tty.prompts, stdout, stderr)
+		}
+		if _, err := keyring.Get("docs-cli", "gemini-api-key"); !errors.Is(err, keyring.ErrNotFound) {
+			t.Fatalf("key stored, err %v", err)
+		}
+		assertAbsent(t, filepath.Join(dir, "jd-tech.md"))
+		assertAbsent(t, filepath.Join(dir, "jd-tech-dist.md"))
+	})
+
+	t.Run("invalid key", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "gemini-api-key", `{"api_key":""}`); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		var calls [][]string
+		scriptedFM(t, &calls)
+		hits := 0
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path, "--gemini"}, deps{
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, model), &hits, &geminiCapture{}),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: keyring item is invalid; run docs-cli gemini-key\n" || hits != 0 || len(calls) != 0 {
+			t.Fatalf("exit %d hits %d calls %#v stdout %q stderr %q", code, hits, calls, stdout, stderr)
+		}
+	})
+
+	t.Run("keyring unavailable", func(t *testing.T) {
+		const secret = "keyring-boom-secret"
+		keyring.MockInitWithError(errors.New(secret))
+		t.Cleanup(func() { keyring.MockInit() })
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		var calls [][]string
+		scriptedFM(t, &calls)
+		hits := 0
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path, "--gemini"}, deps{
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, model), &hits, &geminiCapture{}),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: keyring unavailable\n" || hits != 0 || len(calls) != 0 || strings.Contains(stderr, secret) || strings.Contains(stderr, "docs-cli: fm:") {
+			t.Fatalf("exit %d hits %d calls %#v stdout %q stderr %q", code, hits, calls, stdout, stderr)
+		}
+	})
+
+	t.Run("empty requirements", func(t *testing.T) {
+		keyring.MockInitWithError(errors.New("do-not-read-gemini"))
+		t.Cleanup(func() { keyring.MockInit() })
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, jobad.Document{Requirements: []string{"person@example.com"}}))
+		var calls [][]string
+		scriptedFM(t, &calls)
+		hits := 0
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--gemini", "--json", path}, deps{
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, model), &hits, &geminiCapture{}),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: requirements is empty\n" || hits != 0 || len(calls) != 0 || strings.Contains(stderr, "keyring") {
+			t.Fatalf("exit %d hits %d calls %#v stdout %q stderr %q", code, hits, calls, stdout, stderr)
+		}
+	})
+
+	t.Run("bad level", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: model})
+		bad := `{"must_have":[],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"Go","level":"expert","applies_to":null}],"soft_skills":[]}`
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path, "--gemini"}, deps{
+			GeminiClient: mappingClient(t, http.StatusOK, analysisEnvelope(t, bad), &geminiCapture{}),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: gemini analysis rejected: response\n" || len(calls) != 0 || strings.Contains(stderr, "docs-cli: fm:") || strings.Contains(stderr, "expert") {
+			t.Fatalf("exit %d calls %#v stdout %q stderr %q", code, calls, stdout, stderr)
+		}
+		assertAbsent(t, filepath.Join(dir, "jd-tech.md"))
+	})
+
+	t.Run("status 503", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: model})
+		const detail = "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."
+		body := `{"error":{"status":"UNAVAILABLE","message":"` + detail + `"}}`
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--gemini", "--json", path}, deps{
+			GeminiClient: mappingClient(t, http.StatusServiceUnavailable, body, &geminiCapture{}),
+		})
+		wantErr := "docs-cli: gemini analysis rejected: status 503\n" +
+			"docs-cli: gemini analysis rejected: UNAVAILABLE: " + detail + "\n"
+		if code != 1 || stdout != "" || stderr != wantErr || len(calls) != 0 || strings.Contains(stderr, "docs-cli: fm:") || strings.Contains(stderr, apiKey) {
+			t.Fatalf("exit %d calls %#v stdout %q stderr %q", code, calls, stdout, stderr)
+		}
+		assertAbsent(t, filepath.Join(dir, "jd-tech.md"))
+		assertAbsent(t, filepath.Join(dir, "jd-tech-dist.md"))
+	})
+
+	t.Run("existing diagram skips http", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		body := jobFileBytes(t, doc)
+		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
+		diagramPath := filepath.Join(dir, "jd-tech.md")
+		marker := []byte("already-md")
+		writeAt(t, diagramPath, marker)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: model})
+		hits := 0
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path, "--gemini"}, deps{
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, model), &hits, &geminiCapture{}),
+		})
+		wantErr := "docs-cli: tech diagram already exists: " + diagramPath + "\n"
+		if code != 1 || stdout != "" || stderr != wantErr || hits != 0 || len(calls) != 0 {
+			t.Fatalf("exit %d hits %d calls %#v stdout %q stderr %q", code, hits, calls, stdout, stderr)
+		}
+		assertFileBytes(t, diagramPath, marker)
+		assertFileBytes(t, path, body)
+		assertAbsent(t, filepath.Join(dir, "jd-tech-dist.md"))
+	})
+
+	t.Run("batch", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		aBody := jobFileBytes(t, batchJob("Know A"))
+		bBody := jobFileBytes(t, batchJob("Know B"))
+		writeAt(t, filepath.Join(parsed, "a.json"), aBody)
+		writeAt(t, filepath.Join(parsed, "b.json"), bBody)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: batchModel("FROM-FM")})
+		hits := 0
+		var caps []geminiCapture
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch", "--gemini"}, deps{
+			GeminiClient: sequenceGemini(t, &hits, &caps, []geminiHTTPStep{
+				{status: http.StatusOK, body: analysisEnvelope(t, batchModel("Know A"))},
+				{status: http.StatusOK, body: analysisEnvelope(t, batchModel("Know B"))},
+			}),
+		})
+		aAbs, err := filepath.Abs(filepath.Join(analyzed, "a-analysis.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		aMD, err := filepath.Abs(filepath.Join(analyzed, "a-tech.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		aDist, err := filepath.Abs(filepath.Join(analyzed, "a-tech-dist.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		bAbs, err := filepath.Abs(filepath.Join(analyzed, "b-analysis.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		bMD, err := filepath.Abs(filepath.Join(analyzed, "b-tech.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		bDist, err := filepath.Abs(filepath.Join(analyzed, "b-tech-dist.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code != 0 || stderr != "" || stdout != aAbs+"\n"+aMD+"\n"+aDist+"\n"+bAbs+"\n"+bMD+"\n"+bDist+"\n" {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		if hits != 2 || len(calls) != 0 || len(caps) != 2 {
+			t.Fatalf("hits %d calls %#v caps %d", hits, calls, len(caps))
+		}
+		for _, cap := range caps {
+			if strings.Contains(cap.body, company) || strings.Contains(cap.url, apiKey) || strings.Contains(cap.body, apiKey) || cap.header.Get("x-goog-api-key") != apiKey {
+				t.Fatalf("request url %s header %q body %s", cap.url, cap.header.Get("x-goog-api-key"), cap.body)
+			}
+		}
+		assertFileBytes(t, filepath.Join(analyzed, "a-analysis.json"), analysisFileBytes(t, batchModel("Know A")))
+		assertFileBytes(t, filepath.Join(analyzed, "b-analysis.json"), analysisFileBytes(t, batchModel("Know B")))
+		assertFileBytes(t, filepath.Join(analyzed, "a.json"), aBody)
+		assertFileBytes(t, filepath.Join(analyzed, "b.json"), bBody)
+		assertPerm(t, filepath.Join(analyzed, "a-tech.md"), 0o600)
+		assertPerm(t, filepath.Join(analyzed, "b-tech-dist.md"), 0o600)
+		assertAbsent(t, filepath.Join(parsed, "a.json"))
+		assertAbsent(t, filepath.Join(parsed, "b.json"))
+		assertRefreshUntouched(t)
+	})
+
+	t.Run("batch second failure", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		aBody := jobFileBytes(t, batchJob("Know A"))
+		bBody := jobFileBytes(t, batchJob("Know B"))
+		writeAt(t, filepath.Join(parsed, "a.json"), aBody)
+		writeAt(t, filepath.Join(parsed, "b.json"), bBody)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: batchModel("FROM-FM")})
+		hits := 0
+		const detail = "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later."
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--gemini", "--batch"}, deps{
+			GeminiClient: sequenceGemini(t, &hits, nil, []geminiHTTPStep{
+				{status: http.StatusOK, body: analysisEnvelope(t, batchModel("Know A"))},
+				{status: http.StatusServiceUnavailable, body: `{"error":{"status":"UNAVAILABLE","message":"` + detail + `"}}`},
+			}),
+		})
+		aAbs, err := filepath.Abs(filepath.Join(analyzed, "a-analysis.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		aMD, err := filepath.Abs(filepath.Join(analyzed, "a-tech.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		aDist, err := filepath.Abs(filepath.Join(analyzed, "a-tech-dist.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantErr := "docs-cli: gemini analysis rejected: status 503\n" +
+			"docs-cli: gemini analysis rejected: UNAVAILABLE: " + detail + "\n"
+		if code != 1 || stdout != aAbs+"\n"+aMD+"\n"+aDist+"\n" || stderr != wantErr || hits != 2 || len(calls) != 0 || strings.Contains(stderr, "docs-cli: fm:") {
+			t.Fatalf("exit %d hits %d calls %#v stdout %q stderr %q", code, hits, calls, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(analyzed, "a-analysis.json"), analysisFileBytes(t, batchModel("Know A")))
+		assertFileBytes(t, filepath.Join(analyzed, "a.json"), aBody)
+		assertFileBytes(t, filepath.Join(parsed, "b.json"), bBody)
+		assertAbsent(t, filepath.Join(parsed, "a.json"))
+		assertAbsent(t, filepath.Join(analyzed, "b-analysis.json"))
+		assertAbsent(t, filepath.Join(analyzed, "b-tech.md"))
+		assertAbsent(t, filepath.Join(analyzed, "b-tech-dist.md"))
+		assertAbsent(t, filepath.Join(analyzed, "b.json"))
+	})
+
+	t.Run("batch missing key", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		aBody := jobFileBytes(t, batchJob("Know A"))
+		bBody := jobFileBytes(t, batchJob("Know B"))
+		writeAt(t, filepath.Join(parsed, "a.json"), aBody)
+		writeAt(t, filepath.Join(parsed, "b.json"), bBody)
+		var calls [][]string
+		scriptedFM(t, &calls)
+		hits := 0
+		tty := &fakeTTY{terminal: true, secrets: []string{"should-not-ask"}}
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch", "--gemini"}, deps{
+			TTY:          tty,
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, batchModel("Know A")), &hits, &geminiCapture{}),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: gemini api key is not in the keyring\n" || hits != 0 || len(calls) != 0 || len(tty.prompts) != 0 {
+			t.Fatalf("exit %d hits %d calls %#v prompts %q stdout %q stderr %q", code, hits, calls, tty.prompts, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(parsed, "a.json"), aBody)
+		assertFileBytes(t, filepath.Join(parsed, "b.json"), bBody)
+		assertAbsent(t, filepath.Join(dir, "batch", "jobads", "analyzed", "a-analysis.json"))
+		assertAbsent(t, filepath.Join(dir, "batch", "jobads", "analyzed", "a.json"))
+	})
+
+	t.Run("batch existing diagram skips http", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		if err := os.Mkdir(analyzed, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := jobFileBytes(t, batchJob("Know A"))
+		writeAt(t, filepath.Join(parsed, "a.json"), body)
+		marker := []byte("already-md")
+		writeAt(t, filepath.Join(analyzed, "a-tech.md"), marker)
+		var calls [][]string
+		scriptedFM(t, &calls)
+		hits := 0
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch", "--gemini"}, deps{
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, batchModel("Know A")), &hits, &geminiCapture{}),
+		})
+		wantErr := "docs-cli: analyzed file already exists: " + filepath.Join("batch", "jobads", "analyzed", "a-tech.md") + "\n"
+		if code != 1 || stdout != "" || stderr != wantErr || hits != 0 || len(calls) != 0 {
+			t.Fatalf("exit %d hits %d calls %#v stdout %q stderr %q", code, hits, calls, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(analyzed, "a-tech.md"), marker)
+		assertFileBytes(t, filepath.Join(parsed, "a.json"), body)
+		assertAbsent(t, filepath.Join(analyzed, "a-analysis.json"))
+	})
+}
+
+type geminiHTTPStep struct {
+	status int
+	body   string
+}
+
+func sequenceGemini(t *testing.T, hits *int, caps *[]geminiCapture, steps []geminiHTTPStep) *http.Client {
+	t.Helper()
+	n := 0
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		*hits++
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		if caps != nil {
+			*caps = append(*caps, geminiCapture{url: r.URL.String(), header: r.Header.Clone(), body: string(raw)})
+		}
+		if n >= len(steps) {
+			t.Errorf("extra gemini call")
+			return nil, errors.New("extra gemini call")
+		}
+		step := steps[n]
+		n++
+		return &http.Response{
+			StatusCode: step.status,
+			Body:       io.NopCloser(strings.NewReader(step.body)),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})}
+}
+
 func TestAnalyzeUsage(t *testing.T) {
 	const leaked = "super-secret-gemini-key"
 	jobad.SetFMExecForTest(func(argv []string) ([]byte, []byte, int) {
@@ -4007,6 +4445,7 @@ func TestAnalyzeUsage(t *testing.T) {
 		exact bool
 	}{
 		{name: "no flag", args: []string{"analyze"}},
+		{name: "gemini only", args: []string{"analyze", "--gemini"}},
 		{name: "missing value", args: []string{"analyze", "--json"}},
 		{name: "empty value", args: []string{"analyze", "--json", ""}},
 		{name: "unknown flag", args: []string{"analyze", "--bogus"}},
@@ -4038,10 +4477,10 @@ func TestAnalyzeUsage(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  gemini-key\n  analyze --json PATH\n  analyze --batch\n") {
+	if !strings.Contains(usageText, "\n  gemini-key\n  analyze --json PATH [--gemini]\n  analyze --batch [--gemini]\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
 	}
-	if !strings.Contains(usageText, "\n  --batch          analyze every .json file in ./batch/jobads/parsed\n") {
+	if !strings.Contains(usageText, "\n  --batch          analyze every .json file in ./batch/jobads/parsed\n  --gemini         skip the on-device model and call Gemini\n") {
 		t.Fatalf("usage batch flag:\n%s", usageText)
 	}
 }
@@ -4492,6 +4931,9 @@ func TestAnalyzeBatch(t *testing.T) {
 		cases := [][]string{
 			{"analyze", "--batch", "--json", "job.json"},
 			{"analyze", "--json", "job.json", "--batch"},
+			{"analyze", "--batch", "--json", "job.json", "--gemini"},
+			{"analyze", "--json", "job.json", "--batch", "--gemini"},
+			{"analyze", "--gemini"},
 			{"analyze", "--batch", "extra"},
 			{"analyze", "--batch", "--json", "job.json", "extra"},
 			{"analyze", "--batch=false"},
@@ -5919,7 +6361,7 @@ func TestDraftUsage(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  analyze --json PATH\n  analyze --batch\n  draft --json PATH --template PATH --cv PATH [--pdf NAME]\n") {
+	if !strings.Contains(usageText, "\n  analyze --json PATH [--gemini]\n  analyze --batch [--gemini]\n  draft --json PATH --template PATH --cv PATH [--pdf NAME]\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
 	}
 	if !strings.Contains(usageText, "\n  --template PATH  cover-letter template PDF\n  --cv PATH        CV or resume PDF\n  --pdf NAME       PDF file name in drafts; omitted means a timestamped .txt file\n") {
@@ -6230,6 +6672,7 @@ func draftUsageCases() []struct {
 		{name: "template only", args: []string{"draft", "--template", "letter.pdf"}},
 		{name: "json and template", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf"}},
 		{name: "unknown flag", args: []string{"draft", "--bogus"}},
+		{name: "gemini flag", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "--cv", "cv.pdf", "--gemini"}},
 		{name: "out flag", args: []string{"draft", "--out", "letter.txt"}},
 		{name: "extra arg", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "--cv", "cv.pdf", "extra"}},
 		{name: "missing pdf", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "--cv", "cv.pdf", "--pdf"}},
