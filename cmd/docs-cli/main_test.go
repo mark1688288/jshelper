@@ -256,7 +256,7 @@ func TestSetupProduction(t *testing.T) {
 		t.Fatalf("stdout %q", stdout.String())
 	}
 	text := stderr.String()
-	if !strings.Contains(text, "建立 Desktop app「Docs CLI Desktop」後再執行 ./docs-cli setup") || !strings.Contains(text, "docs-cli: copied .env.example to .env") {
+	if !strings.Contains(text, "Create the Desktop app \"Docs CLI Desktop\", then run ./docs-cli setup") || !strings.Contains(text, "docs-cli: copied .env.example to .env") {
 		t.Fatalf("stderr %s", text)
 	}
 	if strings.Contains(text, "docs-cli: wrote credentials.json") || strings.Contains(text, "docs-cli: mode=") || strings.Contains(text, secretValue) {
@@ -286,7 +286,7 @@ func TestSetupProduction(t *testing.T) {
 	if !strings.Contains(text, "docs-cli: wrote credentials.json") || !strings.Contains(text, "docs-cli: mode=production file=.env") {
 		t.Fatalf("stderr %s", text)
 	}
-	if strings.Contains(text, "建立 Desktop app") || strings.Contains(text, secretValue) || strings.Contains(second.buf.String(), secretValue) {
+	if strings.Contains(text, "Create the Desktop app") || strings.Contains(text, secretValue) || strings.Contains(second.buf.String(), secretValue) {
 		t.Fatalf("stderr %s\ntty %s", text, second.buf.String())
 	}
 	if bootstrapCalls != 1 {

@@ -18,15 +18,15 @@ var ErrDevelopmentWizard = errors.New("docs-cli: setup refused: development read
 
 // ErrDesktopClientRequired means bootstrap finished and this call must stop
 // before asking for a client id. The text has no docs-cli: prefix.
-var ErrDesktopClientRequired = errors.New("建立 Desktop app「Docs CLI Desktop」後再執行 ./docs-cli setup")
+var ErrDesktopClientRequired = errors.New("Create the Desktop app \"Docs CLI Desktop\", then run ./docs-cli setup")
 
 const (
 	projectReadyKey    = "DOCS_CLI_PROJECT_READY"
 	bootstrapFailedKey = "DOCS_CLI_BOOTSTRAP_FAILED"
 
-	projectNotReady              = "docs-cli: 專案尚未標成就緒。若 GCP_PROJECT_ID 已被佔用或是保留字，請改 .env 的 GCP_PROJECT_ID，再執行 ./docs-cli setup。"
-	invalidClientBeforeBootstrap = "docs-cli: invalid GOOGLE_OAUTH_CLIENT_ID\ndocs-cli: 清掉 .env 的 GOOGLE_OAUTH_CLIENT_ID，或改成這個專案的 Desktop client id，再執行 ./docs-cli setup。"
-	staleMarkerCleared           = "已清掉 client id、secret 與專案就緒標記：GCP_PROJECT_ID 與標記不一致，Desktop client 留在舊專案。"
+	projectNotReady              = "docs-cli: project is not marked ready. If GCP_PROJECT_ID is taken or reserved, change GCP_PROJECT_ID in .env, then run ./docs-cli setup."
+	invalidClientBeforeBootstrap = "docs-cli: invalid GOOGLE_OAUTH_CLIENT_ID\ndocs-cli: clear GOOGLE_OAUTH_CLIENT_ID in .env, or set it to this project's Desktop client id, then run ./docs-cli setup."
+	staleMarkerCleared           = "Cleared the client id, secret, and project-ready marker: GCP_PROJECT_ID does not match the marker, and the Desktop client stays in the old project."
 )
 
 // wizardStderr receives the stale-marker notice. Bootstrap output uses the
@@ -153,7 +153,7 @@ func EnsureProductionEnv(root string, environ []string, tty TTY) (*Config, error
 		}
 		vals[key] = value
 		if key == "GOOGLE_OAUTH_CLIENT_SECRET" {
-			writeStatus(tty, "已寫入 GOOGLE_OAUTH_CLIENT_SECRET")
+			writeStatus(tty, "Wrote GOOGLE_OAUTH_CLIENT_SECRET")
 		}
 	}
 	_, vals, err = readEnvContent(path)
@@ -330,7 +330,7 @@ func askWizard(tty TTY, key, current string) (string, error) {
 		if ok {
 			return value, nil
 		}
-		writeStatus(tty, "無效的值："+reason)
+		writeStatus(tty, "Invalid value: "+reason)
 		if attempt == 3 {
 			if fatal != nil {
 				return "", fatal
@@ -355,41 +355,41 @@ func acceptWizard(key, input, current string) (value, reason string, fatal error
 		if projectIDPattern.MatchString(value) {
 			return value, "", nil, true
 		}
-		return "", "project id 格式不符", nil, false
+		return "", "project id format is invalid", nil, false
 	case "GCP_PROJECT_NAME":
 		if projectNamePattern.MatchString(value) {
 			return value, "", nil, true
 		}
-		return "", "project name 必須是 4 到 30 個字元且只含英數、空白與連字號", nil, false
+		return "", "project name must be 4 to 30 characters and contain only letters, digits, spaces, and hyphens", nil, false
 	case "GOOGLE_OAUTH_SUPPORT_EMAIL", "GOOGLE_OAUTH_TEST_USER":
 		if value == placeholderEmail {
-			return "", "不可使用佔位 you@gmail.com", nil, false
+			return "", "do not use the placeholder you@gmail.com", nil, false
 		}
 		if validateEmail(key, value) != nil {
-			return "", "email 必須包含 @", nil, false
+			return "", "email must contain @", nil, false
 		}
 		return value, "", nil, true
 	case "GOOGLE_OAUTH_CLIENT_ID":
 		if clientIDPattern.MatchString(value) {
 			return value, "", nil, true
 		}
-		return "", "client id 必須以 .apps.googleusercontent.com 結尾", nil, false
+		return "", "client id must end with .apps.googleusercontent.com", nil, false
 	case "GOOGLE_OAUTH_CLIENT_SECRET":
 		if value == "" {
-			return "", "secret 不可空白", nil, false
+			return "", "secret must not be blank", nil, false
 		}
 		return value, "", nil, true
 	case "GOOGLE_DRIVE_FOLDER_ID":
 		id, err := NormalizeFolderID(value)
 		if err != nil {
 			if errors.Is(err, errFolderRequired) {
-				return "", "Drive 資料夾不可空白", nil, false
+				return "", "Drive folder must not be blank", nil, false
 			}
-			return "", "那不是 Drive 資料夾網址或 id", errFolderFormat, false
+			return "", "that is not a Drive folder URL or id", errFolderFormat, false
 		}
 		return id, "", nil, true
 	default:
-		return "", "project id 格式不符", nil, false
+		return "", "project id format is invalid", nil, false
 	}
 }
 
@@ -399,36 +399,36 @@ func forbiddenValue(key, value string) (string, error, bool) {
 	}
 	switch key {
 	case "GCP_PROJECT_ID":
-		return "project id 格式不符", nil, true
+		return "project id format is invalid", nil, true
 	case "GCP_PROJECT_NAME":
-		return "project name 必須是 4 到 30 個字元且只含英數、空白與連字號", nil, true
+		return "project name must be 4 to 30 characters and contain only letters, digits, spaces, and hyphens", nil, true
 	case "GOOGLE_OAUTH_SUPPORT_EMAIL", "GOOGLE_OAUTH_TEST_USER":
-		return "email 必須包含 @", nil, true
+		return "email must contain @", nil, true
 	case "GOOGLE_OAUTH_CLIENT_ID":
-		return "client id 必須以 .apps.googleusercontent.com 結尾", nil, true
+		return "client id must end with .apps.googleusercontent.com", nil, true
 	case "GOOGLE_DRIVE_FOLDER_ID":
-		return "那不是 Drive 資料夾網址或 id", errFolderFormat, true
+		return "that is not a Drive folder URL or id", errFolderFormat, true
 	default:
-		return "不可包含引號、換行或 NUL", nil, true
+		return "must not contain quotes, newlines, or NUL", nil, true
 	}
 }
 
 func promptFor(key, current string) string {
 	switch key {
 	case "GCP_PROJECT_ID":
-		return "GCP_PROJECT_ID [" + current + "]（直接按 Enter 保留；改掉會清掉 client id、secret 與專案就緒標記，Desktop client 留在舊專案）:"
+		return "GCP_PROJECT_ID [" + current + "] (press Enter to keep it; changing it clears the client id, secret, and project-ready marker, and the Desktop client stays in the old project):"
 	case "GCP_PROJECT_NAME":
-		return "GCP_PROJECT_NAME [" + current + "]（直接按 Enter 保留預設）:"
+		return "GCP_PROJECT_NAME [" + current + "] (press Enter to keep the default):"
 	case "GOOGLE_OAUTH_SUPPORT_EMAIL":
-		return "GOOGLE_OAUTH_SUPPORT_EMAIL（不可使用 you@gmail.com）:"
+		return "GOOGLE_OAUTH_SUPPORT_EMAIL (do not use you@gmail.com):"
 	case "GOOGLE_OAUTH_TEST_USER":
-		return "GOOGLE_OAUTH_TEST_USER（不可使用 you@gmail.com）:"
+		return "GOOGLE_OAUTH_TEST_USER (do not use you@gmail.com):"
 	case "GOOGLE_OAUTH_CLIENT_ID":
 		return "GOOGLE_OAUTH_CLIENT_ID:"
 	case "GOOGLE_OAUTH_CLIENT_SECRET":
-		return "GOOGLE_OAUTH_CLIENT_SECRET（輸入時不顯示）:"
+		return "GOOGLE_OAUTH_CLIENT_SECRET (hidden while typing):"
 	case "GOOGLE_DRIVE_FOLDER_ID":
-		return "GOOGLE_DRIVE_FOLDER_ID（Drive 資料夾 id 或資料夾網址，不可留空；不是 GCP_FOLDER_ID）:"
+		return "GOOGLE_DRIVE_FOLDER_ID (Drive folder id or folder URL, required; not GCP_FOLDER_ID):"
 	default:
 		return key + ":"
 	}

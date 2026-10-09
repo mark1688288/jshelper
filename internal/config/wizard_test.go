@@ -370,7 +370,7 @@ func TestWizardSuccess(t *testing.T) {
 		t.Fatalf("mode line %q", line)
 	}
 	transcript := phase2.buf.String()
-	if strings.Contains(transcript, wizardSecret) || !strings.Contains(transcript, "已寫入 GOOGLE_OAUTH_CLIENT_SECRET") {
+	if strings.Contains(transcript, wizardSecret) || !strings.Contains(transcript, "Wrote GOOGLE_OAUTH_CLIENT_SECRET") {
 		t.Fatalf("secret transcript:\n%s", transcript)
 	}
 	again := &scriptTTY{}
@@ -393,7 +393,7 @@ func TestWizardRejectsClientIDThenAccepts(t *testing.T) {
 		if !errors.Is(err, ErrDesktopClientRequired) {
 			t.Fatalf("err=%v", err)
 		}
-		if *calls != 1 || strings.Contains(tty.buf.String(), "client id 必須以 .apps.googleusercontent.com 結尾") {
+		if *calls != 1 || strings.Contains(tty.buf.String(), "client id must end with .apps.googleusercontent.com") {
 			t.Fatalf("calls=%d transcript:\n%s", *calls, tty.buf.String())
 		}
 	})
@@ -414,7 +414,7 @@ func TestWizardRejectsClientIDThenAccepts(t *testing.T) {
 			t.Fatalf("calls=%d id=%q", *calls, cfg.ClientID)
 		}
 		text := tty.buf.String()
-		if !strings.Contains(text, "無效的值：") || !strings.Contains(text, "client id 必須以 .apps.googleusercontent.com 結尾") {
+		if !strings.Contains(text, "Invalid value: ") || !strings.Contains(text, "client id must end with .apps.googleusercontent.com") {
 			t.Fatalf("transcript:\n%s", text)
 		}
 	})
@@ -443,7 +443,7 @@ func TestWizardRejectsProjectName(t *testing.T) {
 	if !strings.Contains(text, "GCP_PROJECT_NAME=Docs CLI") && !strings.Contains(text, `GCP_PROJECT_NAME="Docs CLI"`) {
 		t.Fatalf("original name missing:\n%s", text)
 	}
-	if !strings.Contains(tty.buf.String(), "project name 必須是 4 到 30 個字元且只含英數、空白與連字號") || strings.Contains(tty.buf.String(), "GOOGLE_OAUTH_CLIENT_ID:") {
+	if !strings.Contains(tty.buf.String(), "project name must be 4 to 30 characters and contain only letters, digits, spaces, and hyphens") || strings.Contains(tty.buf.String(), "GOOGLE_OAUTH_CLIENT_ID:") {
 		t.Fatalf("transcript:\n%s", tty.buf.String())
 	}
 	if *calls != 0 {
@@ -466,7 +466,7 @@ func TestWizardRejectsPlaceholderEmail(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 	prompts := promptLines(tty.buf.String())
-	if len(prompts) < 3 || !strings.Contains(prompts[2], "GOOGLE_OAUTH_SUPPORT_EMAIL") || !strings.Contains(tty.buf.String(), "不可使用佔位 you@gmail.com") || strings.Contains(tty.buf.String(), "GOOGLE_OAUTH_CLIENT_ID:") {
+	if len(prompts) < 3 || !strings.Contains(prompts[2], "GOOGLE_OAUTH_SUPPORT_EMAIL") || !strings.Contains(tty.buf.String(), "do not use the placeholder you@gmail.com") || strings.Contains(tty.buf.String(), "GOOGLE_OAUTH_CLIENT_ID:") {
 		t.Fatalf("transcript:\n%s", tty.buf.String())
 	}
 	if *calls != 0 {
@@ -488,7 +488,7 @@ func TestWizardRejectsEmailWithoutAt(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 	prompts := promptLines(tty.buf.String())
-	if len(prompts) < 3 || !strings.Contains(prompts[2], "GOOGLE_OAUTH_SUPPORT_EMAIL") || !strings.Contains(tty.buf.String(), "email 必須包含 @") || strings.Contains(tty.buf.String(), "GOOGLE_OAUTH_CLIENT_ID:") {
+	if len(prompts) < 3 || !strings.Contains(prompts[2], "GOOGLE_OAUTH_SUPPORT_EMAIL") || !strings.Contains(tty.buf.String(), "email must contain @") || strings.Contains(tty.buf.String(), "GOOGLE_OAUTH_CLIENT_ID:") {
 		t.Fatalf("transcript:\n%s", tty.buf.String())
 	}
 	if *calls != 0 {
@@ -508,7 +508,7 @@ func TestWizardRejectsEmptyFolder(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "GOOGLE_DRIVE_FOLDER_ID") {
 		t.Fatalf("err=%v", err)
 	}
-	if !strings.Contains(tty.buf.String(), "Drive 資料夾不可空白") || strings.Contains(tty.buf.String(), "GOOGLE_OAUTH_CLIENT_ID:") {
+	if !strings.Contains(tty.buf.String(), "Drive folder must not be blank") || strings.Contains(tty.buf.String(), "GOOGLE_OAUTH_CLIENT_ID:") {
 		t.Fatalf("transcript:\n%s", tty.buf.String())
 	}
 	if *calls != 0 {
@@ -690,7 +690,7 @@ func TestPhase2AsksClientIDOnly(t *testing.T) {
 		t.Fatalf("calls=%d id=%q", *calls, cfg.ClientID)
 	}
 	text := tty.buf.String()
-	if !strings.Contains(text, "已寫入 GOOGLE_OAUTH_CLIENT_SECRET") || strings.Contains(text, wizardSecret) {
+	if !strings.Contains(text, "Wrote GOOGLE_OAUTH_CLIENT_SECRET") || strings.Contains(text, wizardSecret) {
 		t.Fatalf("transcript:\n%s", text)
 	}
 	if strings.Contains(text, "GCP_PROJECT_ID") || strings.Contains(text, "GOOGLE_DRIVE_FOLDER_ID") {
@@ -757,11 +757,11 @@ func TestProjectIDPromptClearsClientAndMarker(t *testing.T) {
 	if vals["GCP_PROJECT_ID"] != "docs-cli-new" || vals["GOOGLE_OAUTH_CLIENT_ID"] != "" || vals["GOOGLE_OAUTH_CLIENT_SECRET"] != "" || vals[projectReadyKey] != "" {
 		t.Fatalf("snapshot vals=%v\n%s", vals, snapshot)
 	}
-	full := "已清掉 client id、secret 與專案就緒標記：GCP_PROJECT_ID 與標記不一致"
+	full := "Cleared the client id, secret, and project-ready marker: GCP_PROJECT_ID does not match the marker"
 	if strings.Contains(tty.buf.String(), full) || strings.Contains(stderr.String(), full) {
 		t.Fatalf("status line leaked\ntty:\n%s\nstderr:\n%s", tty.buf.String(), stderr.String())
 	}
-	if !strings.Contains(tty.buf.String(), "清掉 client id、secret 與專案就緒標記") {
+	if !strings.Contains(tty.buf.String(), "clears the client id, secret, and project-ready marker") {
 		t.Fatalf("prompt:\n%s", tty.buf.String())
 	}
 }
@@ -816,7 +816,7 @@ func TestBootstrapFailureDoesNotAskClientID(t *testing.T) {
 	if err == nil || errors.Is(err, ErrDesktopClientRequired) {
 		t.Fatalf("err=%v", err)
 	}
-	if !strings.Contains(err.Error(), "專案尚未標成就緒") || !strings.Contains(err.Error(), "docs-cli: bootstrap failed:") {
+	if !strings.Contains(err.Error(), "project is not marked ready") || !strings.Contains(err.Error(), "docs-cli: bootstrap failed:") {
 		t.Fatalf("err=%v", err)
 	}
 	if *calls != 1 || tty.reads != 0 {
@@ -880,7 +880,7 @@ func TestInvalidClientIDWithoutMarkerDoesNotExecBootstrap(t *testing.T) {
 			if err == nil || errors.Is(err, ErrDesktopClientRequired) {
 				t.Fatalf("err=%v", err)
 			}
-			if !strings.Contains(err.Error(), "docs-cli: invalid GOOGLE_OAUTH_CLIENT_ID") || !strings.Contains(err.Error(), "清掉 .env 的 GOOGLE_OAUTH_CLIENT_ID") {
+			if !strings.Contains(err.Error(), "docs-cli: invalid GOOGLE_OAUTH_CLIENT_ID") || !strings.Contains(err.Error(), "clear GOOGLE_OAUTH_CLIENT_ID in .env") {
 				t.Fatalf("err=%v", err)
 			}
 			if *calls != 0 {
