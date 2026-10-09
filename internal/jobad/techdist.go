@@ -1,65 +1,48 @@
 package jobad
 
 import (
-	"bytes"
-	"encoding/xml"
 	"errors"
 	"strconv"
 	"strings"
 )
 
 // ErrTechDistributionInvalid is returned when a drawn tech level is not must or advantage.
-// The CLI prints this text and writes neither diagram.
+// The CLI prints this text and writes neither the relationship diagram nor this chart.
 var ErrTechDistributionInvalid = errors.New("docs-cli: tech distribution is invalid")
 
-const (
-	distPad       = 24
-	distGap       = 16
-	distFont      = 16
-	distLine      = 22
-	distCellMin   = 96
-	distCellPad   = 16
-	distCircleGap = 12
-	distTextPad   = 12
-	distEllipseIn = 6
-)
+// distInit is the first line inside every non-empty distribution fence.
+// Width and height stay fixed, so every file uses the same init.
+const distInit = `%%{init: {"theme": "base", "quadrantChart": {"chartWidth": 860, "chartHeight": 860, "pointLabelFontSize": 14, "pointRadius": 6, "pointTextPadding": 10, "quadrantLabelFontSize": 14}, "themeVariables": {"quadrant1Fill": "#E8E8E8", "quadrant2Fill": "#E8E8E8", "quadrant3Fill": "#D5D5D5", "quadrant4Fill": "#D5D5D5", "quadrant1TextFill": "#262626", "quadrant2TextFill": "#262626", "quadrant3TextFill": "#262626", "quadrant4TextFill": "#262626", "quadrantPointTextFill": "#262626", "quadrantXAxisTextFill": "#262626", "quadrantYAxisTextFill": "#262626", "quadrantTitleFill": "#262626", "quadrantInternalBorderStrokeFill": "#6E6E6E", "quadrantExternalBorderStrokeFill": "#3A3A3A"}}}%%`
 
-// TechDistribution draws analysis.Tech as a UTF-8 SVG.
-// The horizontal axis is must and the vertical axis is advantage.
-// SVG y grows downward, so tick 0 is the bottom of the plot.
-// It does not write a file and does not call fm or Gemini.
-// The same Analysis always produces the same bytes.
-func TechDistribution(analysis Analysis) ([]byte, error) {
-	circles, err := techCircles(analysis.Tech)
+// TechDistribution writes analysis.Tech as UTF-8 Markdown.
+// The file is a Mermaid quadrantChart plus a name table.
+// stem is the chart title. It does not write a file and does not call fm or Gemini.
+// The same stem and Analysis always produce the same bytes.
+func TechDistribution(stem string, analysis Analysis) ([]byte, error) {
+	points, err := distPoints(analysis.Tech)
 	if err != nil {
 		return nil, err
 	}
-	return renderTechDistribution(circles), nil
+	if len(points) == 0 {
+		return []byte("(none)\n"), nil
+	}
+	return renderDistMarkdown(stem, points), nil
 }
 
-type distCircle struct {
-	title string
+type distPoint struct {
+	label string
 	names []string
 	must  int
 	adv   int
 }
 
-type distBubble struct {
-	title  string
-	names  string
-	titleW int
-	namesW int
-	rx     int
-	ry     int
+type distCell struct {
+	m int
+	a int
 }
 
-type distCellKey struct {
-	x int
-	y int
-}
-
-func techCircles(items []Tech) ([]distCircle, error) {
-	var circles []distCircle
+func distPoints(items []Tech) ([]distPoint, error) {
+	var points []distPoint
 	index := map[string]int{}
 	for _, item := range items {
 		name := diagramText(item.Name)
@@ -78,8 +61,8 @@ func techCircles(items []Tech) ([]distCircle, error) {
 			must, adv = 1, 0
 		}
 		if applies == "" {
-			circles = append(circles, distCircle{
-				title: name,
+			points = append(points, distPoint{
+				label: name,
 				names: []string{name},
 				must:  must,
 				adv:   adv,
@@ -87,236 +70,165 @@ func techCircles(items []Tech) ([]distCircle, error) {
 			continue
 		}
 		if at, ok := index[applies]; ok {
-			circles[at].names = append(circles[at].names, name)
-			circles[at].must += must
-			circles[at].adv += adv
+			points[at].names = append(points[at].names, name)
+			points[at].must += must
+			points[at].adv += adv
 			continue
 		}
-		index[applies] = len(circles)
-		circles = append(circles, distCircle{
-			title: applies,
+		index[applies] = len(points)
+		points = append(points, distPoint{
+			label: applies,
 			names: []string{name},
 			must:  must,
 			adv:   adv,
 		})
 	}
-	return circles, nil
+	return points, nil
 }
 
-// distCell is the band between tick count-1 and tick count.
-// A count of 0 shares the cell between 0 and 1.
-func distCell(count int) int {
-	if count < 1 {
-		return 1
+// distBand is one more than the largest count, at least 2, and even.
+// An even band puts 0.5 on the boundary between two integer bands.
+func distBand(points []distPoint) int {
+	maxCount := 0
+	for _, point := range points {
+		if point.must > maxCount {
+			maxCount = point.must
+		}
+		if point.adv > maxCount {
+			maxCount = point.adv
+		}
 	}
-	return count
+	b := maxCount + 1
+	if b < 2 {
+		b = 2
+	}
+	if b%2 == 1 {
+		b++
+	}
+	return b
 }
 
-func renderTechDistribution(circles []distCircle) []byte {
-	n := 2
-	for _, circle := range circles {
-		if circle.must > n {
-			n = circle.must
-		}
-		if circle.adv > n {
-			n = circle.adv
-		}
+func renderDistMarkdown(stem string, points []distPoint) []byte {
+	b := distBand(points)
+	title := strings.ReplaceAll(diagramText(stem), `"`, "")
+	left := countSpan(0, b/2-1)
+	right := countSpan(b/2, b-1)
+	var buf strings.Builder
+	buf.WriteString("```mermaid\n")
+	buf.WriteString(distInit)
+	buf.WriteString("\nquadrantChart\n")
+	buf.WriteString("    title ")
+	buf.WriteString(title)
+	buf.WriteByte('\n')
+	buf.WriteString("    x-axis \"must 0\" --> \"must ")
+	buf.WriteString(strconv.Itoa(b - 1))
+	buf.WriteString("\"\n")
+	buf.WriteString("    y-axis \"advantage 0\" --> \"advantage ")
+	buf.WriteString(strconv.Itoa(b - 1))
+	buf.WriteString("\"\n")
+	writeQuadrant(&buf, 1, right, right)
+	writeQuadrant(&buf, 2, left, right)
+	writeQuadrant(&buf, 3, left, left)
+	writeQuadrant(&buf, 4, right, left)
+	for _, line := range pointLines(points, b) {
+		buf.WriteString("    ")
+		buf.WriteString(line)
+		buf.WriteByte('\n')
 	}
-
-	var order []distCellKey
-	groups := map[distCellKey][]distBubble{}
-	for _, circle := range circles {
-		key := distCellKey{x: distCell(circle.must), y: distCell(circle.adv)}
-		bubble := measureBubble(circle)
-		if _, ok := groups[key]; !ok {
-			order = append(order, key)
-		}
-		groups[key] = append(groups[key], bubble)
+	buf.WriteString("```\n\n")
+	buf.WriteString("| applies_to | must | advantage | 技術 |\n")
+	buf.WriteString("| --- | --- | --- | --- |\n")
+	for _, point := range points {
+		buf.WriteString("| ")
+		buf.WriteString(distLabel(point.label))
+		buf.WriteString(" | ")
+		buf.WriteString(strconv.Itoa(point.must))
+		buf.WriteString(" | ")
+		buf.WriteString(strconv.Itoa(point.adv))
+		buf.WriteString(" | ")
+		buf.WriteString(strings.Join(point.names, " / "))
+		buf.WriteString(" |\n")
 	}
-
-	colW := make([]int, n+1)
-	rowH := make([]int, n+1)
-	for i := 1; i <= n; i++ {
-		colW[i] = distCellMin
-		rowH[i] = distCellMin
-	}
-	for key, bubbles := range groups {
-		maxW := 0
-		totalH := 0
-		for i, bubble := range bubbles {
-			if i > 0 {
-				totalH += distCircleGap
-			}
-			totalH += 2 * bubble.ry
-			if w := 2 * bubble.rx; w > maxW {
-				maxW = w
-			}
-		}
-		if need := maxW + 2*distCellPad; need > colW[key.x] {
-			colW[key.x] = need
-		}
-		if need := totalH + 2*distCellPad; need > rowH[key.y] {
-			rowH[key.y] = need
-		}
-	}
-
-	plotW := 0
-	plotH := 0
-	for i := 1; i <= n; i++ {
-		plotW += colW[i]
-		plotH += rowH[i]
-	}
-	tickW := textPx(strconv.Itoa(n))
-	advW := textPx("advantage")
-	originX := distPad + advW + distGap + tickW + distGap
-	originY := distPad + plotH
-	xs := make([]int, n+1)
-	ys := make([]int, n+1)
-	xs[0] = originX
-	ys[0] = originY
-	for i := 1; i <= n; i++ {
-		xs[i] = xs[i-1] + colW[i]
-		ys[i] = ys[i-1] - rowH[i]
-	}
-	xTickY := originY + distGap + distFont
-	mustY := xTickY + distGap + distFont
-	width := xs[n] + distPad
-	height := mustY + distPad
-
-	var b strings.Builder
-	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-	b.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 `)
-	b.WriteString(strconv.Itoa(width))
-	b.WriteString(` `)
-	b.WriteString(strconv.Itoa(height))
-	b.WriteString("\">\n")
-	b.WriteString("<title>tech distribution</title>\n")
-
-	for x := 1; x <= n; x++ {
-		for y := 1; y <= n; y++ {
-			writeDistRect(&b, x, y, xs[x-1], ys[y], colW[x], rowH[y])
-		}
-	}
-	writeDistLine(&b, xs[0], ys[0], xs[n], ys[0])
-	writeDistLine(&b, xs[0], ys[0], xs[0], ys[n])
-	for i := 0; i <= n; i++ {
-		label := strconv.Itoa(i)
-		writeDistLabel(&b, xs[i]-textPx(label)/2, xTickY, "tick", label)
-		writeDistLabel(&b, xs[0]-distGap-textPx(label), ys[i]+4, "tick", label)
-	}
-	writeDistLabel(&b, originX+plotW/2-textPx("must")/2, mustY, "axis-label", "must")
-	writeDistLabel(&b, distPad, distPad+plotH/2+4, "axis-label", "advantage")
-
-	if len(circles) == 0 {
-		writeDistLabel(&b, originX+plotW/2-textPx("(none)")/2, distPad+plotH/2, "empty", "(none)")
-		b.WriteString("</svg>\n")
-		return []byte(b.String())
-	}
-
-	for _, key := range order {
-		b.WriteString(`<g class="at" id="cell-`)
-		b.WriteString(strconv.Itoa(key.x))
-		b.WriteString("-")
-		b.WriteString(strconv.Itoa(key.y))
-		b.WriteString("\">\n")
-		left := xs[key.x-1]
-		top := ys[key.y]
-		cx := left + colW[key.x]/2
-		cursor := top + distCellPad
-		bubbles := groups[key]
-		for i, bubble := range bubbles {
-			if i > 0 {
-				cursor += distCircleGap
-			}
-			cy := cursor + bubble.ry
-			writeDistCircle(&b, cx, cy, bubble)
-			cursor += 2 * bubble.ry
-		}
-		b.WriteString("</g>\n")
-	}
-	b.WriteString("</svg>\n")
-	return []byte(b.String())
+	return []byte(buf.String())
 }
 
-func measureBubble(circle distCircle) distBubble {
-	names := strings.Join(circle.names, " / ")
-	titleW := textPx(circle.title)
-	namesW := textPx(names)
-	textW := titleW
-	if namesW > textW {
-		textW = namesW
+func writeQuadrant(buf *strings.Builder, n int, must, adv string) {
+	buf.WriteString("    quadrant-")
+	buf.WriteString(strconv.Itoa(n))
+	buf.WriteString(" \"must ")
+	buf.WriteString(must)
+	buf.WriteString(" · advantage ")
+	buf.WriteString(adv)
+	buf.WriteString("\"\n")
+}
+
+func countSpan(lo, hi int) string {
+	if lo == hi {
+		return strconv.Itoa(lo)
 	}
-	rx := textW/2 + distTextPad
-	ry := distLine/2 + distFont + distEllipseIn
-	if rx < ry {
-		rx = ry
+	return strconv.Itoa(lo) + "–" + strconv.Itoa(hi)
+}
+
+func distLabel(s string) string {
+	return strings.ReplaceAll(s, `"`, "'")
+}
+
+func pointLines(points []distPoint, b int) []string {
+	counts := map[distCell]int{}
+	for _, point := range points {
+		counts[distCell{m: point.must, a: point.adv}]++
 	}
-	return distBubble{
-		title:  circle.title,
-		names:  names,
-		titleW: titleW,
-		namesW: namesW,
-		rx:     rx,
-		ry:     ry,
+	seen := map[distCell]int{}
+	lines := make([]string, len(points))
+	for n, point := range points {
+		key := distCell{m: point.must, a: point.adv}
+		i := seen[key]
+		seen[key] = i + 1
+		x, y := pointCoord(point.must, point.adv, i, counts[key], b)
+		lines[n] = strconv.Quote(distLabel(point.label)) + ": [" + x + ", " + y + "] " + pointStyle(point.must, point.adv)
+	}
+	return lines
+}
+
+func pointStyle(must, adv int) string {
+	switch {
+	case adv == 0:
+		return "color: #3A3A3A, stroke-color: #3A3A3A, stroke-width: 1px"
+	case must == 0:
+		return "color: #F2F2F2, stroke-color: #3A3A3A, stroke-width: 2px"
+	default:
+		return "color: #737373, stroke-color: #3A3A3A, stroke-width: 1px"
 	}
 }
 
-func writeDistRect(b *strings.Builder, x, y, left, top, w, h int) {
-	b.WriteString(`<rect class="grid-cell" id="grid-`)
-	b.WriteString(strconv.Itoa(x))
-	b.WriteString("-")
-	b.WriteString(strconv.Itoa(y))
-	b.WriteString(`" x="`)
-	b.WriteString(strconv.Itoa(left))
-	b.WriteString(`" y="`)
-	b.WriteString(strconv.Itoa(top))
-	b.WriteString(`" width="`)
-	b.WriteString(strconv.Itoa(w))
-	b.WriteString(`" height="`)
-	b.WriteString(strconv.Itoa(h))
-	b.WriteString(`" fill="#ffffff" stroke="#d6d3d1"/>` + "\n")
+// pointCoord places point i of k inside cell (m, a).
+// k is 1 to 4 uses the cell center. More than 4 uses columns of 4.
+func pointCoord(m, a, i, k, b int) (string, string) {
+	if k <= 4 {
+		xNum := int64(2*m + 1)
+		xDen := int64(2 * b)
+		yNum := int64(20*k*a + 19*k - 9*(2*i+1))
+		yDen := int64(20 * k * b)
+		return formatCoord(xNum, xDen), formatCoord(yNum, yDen)
+	}
+	cols := (k + 3) / 4
+	c := i / 4
+	r := i % 4
+	xNum := int64(20*cols*m + cols + 9*(2*c+1))
+	xDen := int64(20 * cols * b)
+	yNum := int64(80*a + 76 - 9*(2*r+1))
+	yDen := int64(80 * b)
+	return formatCoord(xNum, xDen), formatCoord(yNum, yDen)
 }
 
-func writeDistLine(b *strings.Builder, x1, y1, x2, y2 int) {
-	b.WriteString(`<line class="axis" x1="`)
-	b.WriteString(strconv.Itoa(x1))
-	b.WriteString(`" y1="`)
-	b.WriteString(strconv.Itoa(y1))
-	b.WriteString(`" x2="`)
-	b.WriteString(strconv.Itoa(x2))
-	b.WriteString(`" y2="`)
-	b.WriteString(strconv.Itoa(y2))
-	b.WriteString(`" stroke="#111111"/>` + "\n")
-}
-
-func writeDistCircle(b *strings.Builder, cx, cy int, bubble distBubble) {
-	b.WriteString("<g class=\"circle\">\n")
-	b.WriteString(`<ellipse class="circle" cx="`)
-	b.WriteString(strconv.Itoa(cx))
-	b.WriteString(`" cy="`)
-	b.WriteString(strconv.Itoa(cy))
-	b.WriteString(`" rx="`)
-	b.WriteString(strconv.Itoa(bubble.rx))
-	b.WriteString(`" ry="`)
-	b.WriteString(strconv.Itoa(bubble.ry))
-	b.WriteString(`" stroke="#111111" fill="#ffffff"/>` + "\n")
-	writeDistLabel(b, cx-bubble.titleW/2, cy-distLine/2, "title", bubble.title)
-	writeDistLabel(b, cx-bubble.namesW/2, cy+distLine/2, "names", bubble.names)
-	b.WriteString("</g>\n")
-}
-
-func writeDistLabel(b *strings.Builder, x, y int, class, text string) {
-	b.WriteString(`<g transform="translate(`)
-	b.WriteString(strconv.Itoa(x))
-	b.WriteString(` `)
-	b.WriteString(strconv.Itoa(y))
-	b.WriteString(")\">\n")
-	b.WriteString(`<text class="`)
-	b.WriteString(class)
-	b.WriteString(`">`)
-	var esc bytes.Buffer
-	_ = xml.EscapeText(&esc, []byte(text))
-	b.Write(esc.Bytes())
-	b.WriteString("</text>\n")
-	b.WriteString("</g>\n")
+// formatCoord prints a positive ratio to three decimal places.
+// The ratio is rounded half away from zero in decimal first.
+// FormatFloat of the nearest float64 to 0.3625 prints 0.362, and the chart spec locks 0.363.
+func formatCoord(num, den int64) string {
+	q := (num * 1000) / den
+	rem := (num * 1000) % den
+	if rem*2 >= den {
+		q++
+	}
+	return strconv.FormatFloat(float64(q)/1000, 'f', 3, 64)
 }
