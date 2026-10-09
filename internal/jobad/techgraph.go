@@ -1,8 +1,6 @@
 package jobad
 
 import (
-	"bytes"
-	"encoding/xml"
 	"errors"
 	"strconv"
 	"strings"
@@ -13,17 +11,11 @@ import (
 // The CLI prints this text and does not write the diagram.
 var ErrTechDiagramInvalid = errors.New("docs-cli: tech diagram is invalid")
 
-const (
-	diagramPad   = 24
-	diagramFont  = 16
-	diagramChar  = 8
-	diagramRow   = 56
-	diagramArrow = 80
-	diagramGap   = 16
-)
+// flowchartInit is the first line inside every non-empty relationship fence.
+const flowchartInit = `%%{init: {"theme": "base", "flowchart": {"htmlLabels": true}, "themeVariables": {"background": "#E8E8E8", "mainBkg": "#E8E8E8", "fontFamily": "sans-serif", "fontSize": "16px", "primaryColor": "#E8E8E8", "primaryTextColor": "#262626", "primaryBorderColor": "#6E6E6E", "lineColor": "#3A3A3A", "textColor": "#262626", "edgeLabelBackground": "#E8E8E8"}}}%%`
 
-// TechDiagram draws analysis.Tech as a UTF-8 SVG.
-// It does not write a file and does not call fm or Gemini.
+// TechDiagram writes analysis.Tech as UTF-8 Markdown.
+// The file is a Mermaid flowchart. It does not write a file and does not call fm or Gemini.
 // The same Analysis always produces the same bytes.
 func TechDiagram(analysis Analysis) ([]byte, error) {
 	rows, err := techRows(analysis.Tech)
@@ -31,9 +23,9 @@ func TechDiagram(analysis Analysis) ([]byte, error) {
 		return nil, err
 	}
 	if len(rows) == 0 {
-		return emptyTechDiagram(), nil
+		return []byte("(none)\n"), nil
 	}
-	return renderTechRows(rows), nil
+	return renderFlowchart(rows), nil
 }
 
 type techRow struct {
@@ -86,7 +78,7 @@ func techRows(items []Tech) ([]techRow, error) {
 	return rows, nil
 }
 
-// diagramText is the label drawn on the SVG.
+// diagramText is the label drawn on a diagram.
 // Whitespace collapses to one space. Other control runes are dropped.
 func diagramText(s string) string {
 	var b strings.Builder
@@ -99,162 +91,85 @@ func diagramText(s string) string {
 	return strings.Join(strings.Fields(b.String()), " ")
 }
 
-func textPx(s string) int {
-	return len([]rune(s)) * diagramChar
+// flowchartLabel rewrites characters that would break a Mermaid node label.
+// The rewrite is only for this diagram. "<br/>" is inserted after it.
+func flowchartLabel(s string) string {
+	return strings.NewReplacer(
+		`"`, `'`,
+		`[`, `(`,
+		`]`, `)`,
+		`<`, `(`,
+		`>`, `)`,
+	).Replace(s)
 }
 
-func emptyTechDiagram() []byte {
-	label := "(none)"
-	w := diagramPad + textPx(label) + diagramPad
-	h := diagramPad + diagramRow + diagramPad
+func renderFlowchart(rows []techRow) []byte {
 	var b strings.Builder
-	writeTechHeader(&b, w, h)
-	b.WriteString(`<g transform="translate(`)
-	b.WriteString(strconv.Itoa(diagramPad))
-	b.WriteString(` `)
-	b.WriteString(strconv.Itoa(diagramPad + diagramFont))
-	b.WriteString(")\">\n")
-	b.WriteString("<text class=\"empty\">(none)</text>\n")
-	b.WriteString("</g>\n")
-	b.WriteString("</svg>\n")
-	return []byte(b.String())
-}
+	b.WriteString("```mermaid\n")
+	b.WriteString(flowchartInit)
+	b.WriteString("\nflowchart LR\n")
+	b.WriteString("    classDef must fill:#3A3A3A,stroke:#3A3A3A,color:#F2F2F2,stroke-width:1px\n")
+	b.WriteString("    classDef advantage fill:#F2F2F2,stroke:#3A3A3A,color:#262626,stroke-width:2px\n")
+	b.WriteString("    classDef target fill:#D5D5D5,stroke:#6E6E6E,color:#262626,stroke-width:1px\n")
 
-func renderTechRows(rows []techRow) []byte {
-	maxLinkName := 0
-	maxApplies := 0
-	maxLeft := 0
-	anyLink := false
+	next := 1
+	targets := map[string]string{}
+	links := 0
+	id := func() string {
+		s := "n" + strconv.Itoa(next)
+		next++
+		return s
+	}
 	for _, row := range rows {
-		label := strings.Join(row.names, " / ")
+		label := flowchartLabel(strings.Join(row.names, " / "))
 		if row.standalone {
-			if w := textPx(label); w > maxLeft {
-				maxLeft = w
-			}
-			if w := textPx(row.level); w > maxLeft {
-				maxLeft = w
-			}
+			src := id()
+			b.WriteString("    ")
+			b.WriteString(src)
+			b.WriteString(`["`)
+			b.WriteString(label)
+			b.WriteString("<br/>")
+			b.WriteString(row.level)
+			b.WriteString(`"]:::`)
+			b.WriteString(row.level)
+			b.WriteByte('\n')
 			continue
 		}
-		anyLink = true
-		if w := textPx(label); w > maxLinkName {
-			maxLinkName = w
+		src := id()
+		b.WriteString("    ")
+		b.WriteString(src)
+		b.WriteString(`["`)
+		b.WriteString(label)
+		b.WriteString(`"]:::`)
+		b.WriteString(row.level)
+		b.WriteByte('\n')
+		tgt, ok := targets[row.applies]
+		if !ok {
+			tgt = id()
+			targets[row.applies] = tgt
+			b.WriteString("    ")
+			b.WriteString(tgt)
+			b.WriteString(`["`)
+			b.WriteString(flowchartLabel(row.applies))
+			b.WriteString(`"]:::target`)
+			b.WriteByte('\n')
 		}
-		if w := textPx(row.applies); w > maxApplies {
-			maxApplies = w
-		}
-	}
-	width := diagramPad + maxLeft + diagramPad
-	appliesX := 0
-	if anyLink {
-		appliesX = diagramPad + maxLinkName + diagramGap + diagramArrow + diagramGap
-		if right := appliesX + maxApplies; right+diagramPad > width {
-			width = right + diagramPad
-		}
-	}
-	height := diagramPad + len(rows)*diagramRow + diagramPad
-
-	var b strings.Builder
-	writeTechHeader(&b, width, height)
-	if anyLink {
-		b.WriteString("<defs>\n")
-		b.WriteString(`<marker id="arrow" viewBox="0 0 8 8" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto">` + "\n")
-		b.WriteString(`<polygon points="0 0, 8 4, 0 8" fill="#111111"/>` + "\n")
-		b.WriteString("</marker>\n")
-		b.WriteString("</defs>\n")
-	}
-	type anchor struct {
-		x2 int
-		y  int
-	}
-	anchors := map[string]anchor{}
-	for i, row := range rows {
-		label := strings.Join(row.names, " / ")
-		nameY := diagramPad + diagramFont + i*diagramRow
-		b.WriteString(`<g id="row-`)
-		b.WriteString(strconv.Itoa(i + 1))
-		b.WriteString(`" class="`)
-		if row.standalone {
-			b.WriteString("standalone")
+		b.WriteString("    ")
+		b.WriteString(src)
+		if row.level == levelAdvantage {
+			b.WriteString(" -.->|advantage| ")
 		} else {
-			b.WriteString("link")
+			b.WriteString(" -->|must| ")
 		}
-		b.WriteString("\">\n")
-		writeTechText(&b, "name", diagramPad, nameY, label)
-		if row.standalone {
-			writeTechText(&b, "level", diagramPad, nameY+22, row.level)
-			b.WriteString("</g>\n")
-			continue
-		}
-		x1 := diagramPad + textPx(label) + diagramGap
-		y1 := nameY - 4
-		x2 := appliesX - diagramGap
-		y2 := y1
-		drawApplies := false
-		if at, ok := anchors[row.applies]; ok {
-			x2 = at.x2
-			y2 = at.y
-		} else {
-			anchors[row.applies] = anchor{x2: x2, y: y2}
-			drawApplies = true
-		}
-		writeTechLine(&b, row.level, x1, y1, x2, y2)
-		midX := (x1 + x2) / 2
-		midY := (y1 + y2) / 2
-		levelX := midX - textPx(row.level)/2
-		if levelX < 0 {
-			levelX = 0
-		}
-		writeTechText(&b, "level", levelX, midY-8, row.level)
-		if drawApplies {
-			writeTechText(&b, "applies", appliesX, nameY, row.applies)
-		}
-		b.WriteString("</g>\n")
+		b.WriteString(tgt)
+		b.WriteByte('\n')
+		links++
 	}
-	b.WriteString("</svg>\n")
+	for i := 0; i < links; i++ {
+		b.WriteString("    linkStyle ")
+		b.WriteString(strconv.Itoa(i))
+		b.WriteString(" stroke:#3A3A3A,stroke-width:2px\n")
+	}
+	b.WriteString("```\n")
 	return []byte(b.String())
-}
-
-func writeTechHeader(b *strings.Builder, w, h int) {
-	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-	b.WriteString(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 `)
-	b.WriteString(strconv.Itoa(w))
-	b.WriteString(` `)
-	b.WriteString(strconv.Itoa(h))
-	b.WriteString(`" font-family="sans-serif" font-size="16" fill="#111111">` + "\n")
-	b.WriteString("<title>tech</title>\n")
-}
-
-func writeTechText(b *strings.Builder, class string, x, y int, text string) {
-	b.WriteString(`<text class="`)
-	b.WriteString(class)
-	b.WriteString(`" x="`)
-	b.WriteString(strconv.Itoa(x))
-	b.WriteString(`" y="`)
-	b.WriteString(strconv.Itoa(y))
-	b.WriteString(`">`)
-	var esc bytes.Buffer
-	_ = xml.EscapeText(&esc, []byte(text))
-	b.Write(esc.Bytes())
-	b.WriteString("</text>\n")
-}
-
-func writeTechLine(b *strings.Builder, level string, x1, y1, x2, y2 int) {
-	b.WriteString(`<line class="`)
-	b.WriteString(level)
-	b.WriteString(`" x1="`)
-	b.WriteString(strconv.Itoa(x1))
-	b.WriteString(`" y1="`)
-	b.WriteString(strconv.Itoa(y1))
-	b.WriteString(`" x2="`)
-	b.WriteString(strconv.Itoa(x2))
-	b.WriteString(`" y2="`)
-	b.WriteString(strconv.Itoa(y2))
-	b.WriteString(`" stroke="`)
-	if level == levelAdvantage {
-		b.WriteString(`#9a3412" stroke-dasharray="6 4"`)
-	} else {
-		b.WriteString(`#111111"`)
-	}
-	b.WriteString(` stroke-width="2" marker-end="url(#arrow)"/>` + "\n")
 }

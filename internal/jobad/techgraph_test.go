@@ -35,48 +35,68 @@ func TestTechDiagram(t *testing.T) {
 		if !bytes.Equal(got, again) {
 			t.Fatal("diagram bytes changed")
 		}
-		svg := string(got)
-		if !strings.HasPrefix(svg, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n") || !strings.HasSuffix(svg, "</svg>\n") {
-			t.Fatalf("svg envelope %q", svg[:80])
+		want := flowchartFile(
+			`    n1["Java / Spring Boot"]:::must`,
+			`    n2["Backend"]:::target`,
+			`    n1 -->|must| n2`,
+			`    n3["RESTful APIs"]:::must`,
+			`    n4["Full Stack"]:::target`,
+			`    n3 -->|must| n4`,
+			`    n5["SQL Server"]:::must`,
+			`    n6["Database"]:::target`,
+			`    n5 -->|must| n6`,
+			`    n7["Azure Cloud services"]:::must`,
+			`    n8["Infrastructure"]:::target`,
+			`    n7 -->|must| n8`,
+			`    n9["Salesforce"]:::advantage`,
+			`    n10["Integration"]:::target`,
+			`    n9 -.->|advantage| n10`,
+			`    n11["AI-assisted software development tools"]:::advantage`,
+			`    n12["Development"]:::target`,
+			`    n11 -.->|advantage| n12`,
+			`    linkStyle 0 stroke:#3A3A3A,stroke-width:2px`,
+			`    linkStyle 1 stroke:#3A3A3A,stroke-width:2px`,
+			`    linkStyle 2 stroke:#3A3A3A,stroke-width:2px`,
+			`    linkStyle 3 stroke:#3A3A3A,stroke-width:2px`,
+			`    linkStyle 4 stroke:#3A3A3A,stroke-width:2px`,
+			`    linkStyle 5 stroke:#3A3A3A,stroke-width:2px`,
+		)
+		if string(got) != want {
+			t.Fatalf("diagram\n%s", got)
 		}
-		if !strings.Contains(svg, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 `) || !strings.Contains(svg, "<title>tech</title>") {
-			t.Fatalf("svg header %s", svg)
-		}
-		for _, want := range []string{
-			"Java / Spring Boot",
-			">Backend</text>",
-			`class="must"`,
-			"Salesforce",
-			">Integration</text>",
-			`class="advantage"`,
-			"RESTful APIs",
-			"Full Stack",
-			"SQL Server",
-			"Database",
-			"Azure Cloud services",
-			"Infrastructure",
-			"AI-assisted software development tools",
-			"Development",
-			`stroke="#111111"`,
-			`stroke="#9a3412"`,
-			`stroke-dasharray="6 4"`,
-			`marker-end="url(#arrow)"`,
-		} {
-			if !strings.Contains(svg, want) {
-				t.Fatalf("missing %q\n%s", want, svg)
+		for _, banned := range []string{"NOT-IN-DIAGRAM", "ALSO-NOT", "English", "Communication", "<svg", "#111111", "#9a3412", "<script"} {
+			if strings.Contains(string(got), banned) {
+				t.Fatalf("diagram contains %q", banned)
 			}
 		}
-		for _, banned := range []string{"NOT-IN-DIAGRAM", "ALSO-NOT", "English", "Communication", "<script", "foreignObject"} {
-			if strings.Contains(svg, banned) {
-				t.Fatalf("svg contains %q", banned)
-			}
+	})
+
+	t.Run("shared target and standalone nodes", func(t *testing.T) {
+		got, err := TechDiagram(Analysis{Tech: []Tech{
+			{Name: "Java", Level: levelMust, AppliesTo: techPtr("Backend")},
+			{Name: "Kotlin", Level: levelAdvantage, AppliesTo: techPtr("Backend")},
+			{Name: "Go", Level: levelMust, AppliesTo: nil},
+			{Name: "Rust", Level: levelAdvantage, AppliesTo: techPtr("  ")},
+		}})
+		if err != nil {
+			t.Fatal(err)
 		}
-		if strings.Count(svg, `class="link"`) != 6 {
-			t.Fatalf("links %d\n%s", strings.Count(svg, `class="link"`), svg)
+		want := flowchartFile(
+			`    n1["Java"]:::must`,
+			`    n2["Backend"]:::target`,
+			`    n1 -->|must| n2`,
+			`    n3["Kotlin"]:::advantage`,
+			`    n3 -.->|advantage| n2`,
+			`    n4["Go<br/>must"]:::must`,
+			`    n5["Rust<br/>advantage"]:::advantage`,
+			`    linkStyle 0 stroke:#3A3A3A,stroke-width:2px`,
+			`    linkStyle 1 stroke:#3A3A3A,stroke-width:2px`,
+		)
+		if string(got) != want {
+			t.Fatalf("diagram\n%s", got)
 		}
-		row := techGroup(t, svg, "row-1")
-		if !strings.Contains(row, "Java / Spring Boot") || !strings.Contains(row, ">Backend</text>") || !strings.Contains(row, `class="must"`) {
-			t.Fatalf("row-1 %s", row)
+		if strings.Count(string(got), `["Backend"]`) != 1 {
+			t.Fatalf("targets\n%s", got)
 		}
 	})
 
@@ -85,13 +105,9 @@ func TestTechDiagram(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		row := techGroup(t, svg, "row-1")
-		if !strings.Contains(row, `class="standalone"`) || !strings.Contains(row, ">Go</text>") || !strings.Contains(row, ">must</text>") {
-			t.Fatalf("row %s", row)
-		}
-		if strings.Contains(row, "<line") || strings.Contains(svg, "<line") || strings.Contains(svg, `class="link"`) {
-			t.Fatalf("standalone has a line\n%s", svg)
+		md := string(got)
+		if !strings.Contains(md, `    n1["Go<br/>must"]:::must`) || strings.Contains(md, "-->") || strings.Contains(md, "linkStyle") || strings.Contains(md, ":::target") {
+			t.Fatalf("diagram\n%s", md)
 		}
 	})
 
@@ -100,10 +116,9 @@ func TestTechDiagram(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		row := techGroup(t, svg, "row-1")
-		if !strings.Contains(row, `class="standalone"`) || !strings.Contains(row, ">advantage</text>") || strings.Contains(row, "<line") {
-			t.Fatalf("row %s", row)
+		md := string(got)
+		if !strings.Contains(md, `    n1["Go<br/>advantage"]:::advantage`) || strings.Contains(md, "-.->") || strings.Contains(md, "linkStyle") {
+			t.Fatalf("diagram\n%s", md)
 		}
 	})
 
@@ -113,27 +128,23 @@ func TestTechDiagram(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			svg := string(got)
-			if !strings.Contains(svg, `<text class="empty">(none)</text>`) {
-				t.Fatalf("svg %s", svg)
-			}
-			if strings.Contains(svg, `class="link"`) || strings.Contains(svg, `class="standalone"`) || strings.Contains(svg, "<line") || strings.Contains(svg, "NOT-IN-DIAGRAM") {
-				t.Fatalf("svg %s", svg)
+			if string(got) != "(none)\n" || bytes.Contains(got, []byte("flowchart")) || bytes.Contains(got, []byte("NOT-IN-DIAGRAM")) {
+				t.Fatalf("diagram %q", got)
 			}
 		}
 	})
 
-	t.Run("escapes xml", func(t *testing.T) {
-		got, err := TechDiagram(Analysis{Tech: []Tech{{Name: "A & B", Level: levelMust, AppliesTo: techPtr("X<Y")}}})
+	t.Run("keeps ampersand and rewrites label characters", func(t *testing.T) {
+		got, err := TechDiagram(Analysis{Tech: []Tech{{Name: `A & B "q" [x]`, Level: levelMust, AppliesTo: techPtr("X<Y>Z]")}}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		if !strings.Contains(svg, "A &amp; B") || strings.Contains(svg, "A & B") {
-			t.Fatalf("svg %s", svg)
+		md := string(got)
+		if !strings.Contains(md, `n1["A & B 'q' (x)"]:::must`) || strings.Contains(md, "A &amp; B") || strings.Contains(md, `&quot;`) {
+			t.Fatalf("diagram\n%s", md)
 		}
-		if !strings.Contains(svg, "X&lt;Y") || strings.Contains(svg, "X<Y") {
-			t.Fatalf("svg %s", svg)
+		if !strings.Contains(md, `n2["X(Y)Z)"]:::target`) || strings.Contains(md, "X<Y") || strings.Contains(md, "X&lt;Y") {
+			t.Fatalf("diagram\n%s", md)
 		}
 	})
 
@@ -145,15 +156,12 @@ func TestTechDiagram(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		if strings.Count(svg, `class="link"`) != 2 {
-			t.Fatalf("links\n%s", svg)
+		md := string(got)
+		if strings.Count(md, ":::must") != 1 || strings.Count(md, ":::advantage") != 1 || strings.Count(md, `["Backend"]`) != 1 {
+			t.Fatalf("diagram\n%s", md)
 		}
-		if strings.Count(svg, ">Backend</text>") != 1 {
-			t.Fatalf("targets\n%s", svg)
-		}
-		if strings.Count(svg, `class="must"`) != 1 || strings.Count(svg, `class="advantage"`) != 1 {
-			t.Fatalf("levels\n%s", svg)
+		if !strings.Contains(md, `n1 -->|must| n2`) || !strings.Contains(md, `n3 -.->|advantage| n2`) {
+			t.Fatalf("diagram\n%s", md)
 		}
 	})
 
@@ -165,9 +173,9 @@ func TestTechDiagram(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		if strings.Count(svg, ">Backend</text>") != 1 || strings.Count(svg, ">backend</text>") != 1 {
-			t.Fatalf("svg %s", svg)
+		md := string(got)
+		if strings.Count(md, `["Backend"]`) != 1 || strings.Count(md, `["backend"]`) != 1 {
+			t.Fatalf("diagram\n%s", md)
 		}
 	})
 
@@ -180,17 +188,14 @@ func TestTechDiagram(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		row1 := techGroup(t, svg, "row-1")
-		row2 := techGroup(t, svg, "row-2")
-		if !strings.Contains(row1, "Java / Spring Boot") || !strings.Contains(row1, ">Backend</text>") {
-			t.Fatalf("row-1 %s", row1)
+		md := string(got)
+		java := strings.Index(md, `n1["Java / Spring Boot"]:::must`)
+		sql := strings.Index(md, `n3["SQL Server"]:::must`)
+		if java < 0 || sql < java || strings.Count(md, "Java / Spring Boot") != 1 || strings.Contains(md[sql:], "Spring Boot") {
+			t.Fatalf("diagram\n%s", md)
 		}
-		if !strings.Contains(row2, "SQL Server") || strings.Contains(row2, "Spring Boot") {
-			t.Fatalf("row-2 %s", row2)
-		}
-		if strings.Count(svg, "Java / Spring Boot") != 1 {
-			t.Fatalf("svg %s", svg)
+		if !strings.Contains(md, `n1 -->|must| n2`) || !strings.Contains(md, `["Backend"]`) {
+			t.Fatalf("diagram\n%s", md)
 		}
 	})
 
@@ -203,14 +208,14 @@ func TestTechDiagram(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		row1 := techGroup(t, svg, "row-1")
-		row2 := techGroup(t, svg, "row-2")
-		if !strings.Contains(row1, `class="link"`) || !strings.Contains(row1, "Java / Spring Boot") {
-			t.Fatalf("row-1 %s", row1)
+		md := string(got)
+		link := strings.Index(md, `n1 -->|must| n2`)
+		alone := strings.Index(md, `n3["Go<br/>must"]:::must`)
+		if link < 0 || alone < link || strings.Contains(md, "Go -->|") || strings.Contains(md, "linkStyle 1") {
+			t.Fatalf("diagram\n%s", md)
 		}
-		if !strings.Contains(row2, `class="standalone"`) || !strings.Contains(row2, ">Go</text>") || strings.Contains(row2, "<line") {
-			t.Fatalf("row-2 %s", row2)
+		if !strings.Contains(md, "Java / Spring Boot") {
+			t.Fatalf("diagram\n%s", md)
 		}
 	})
 
@@ -223,9 +228,9 @@ func TestTechDiagram(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		if strings.Contains(svg, "Backend") || strings.Contains(svg, "expert") || !strings.Contains(svg, ">Go</text>") {
-			t.Fatalf("svg %s", svg)
+		md := string(got)
+		if strings.Contains(md, "Backend") || strings.Contains(md, "expert") || !strings.Contains(md, `n1["Go<br/>must"]:::must`) {
+			t.Fatalf("diagram\n%s", md)
 		}
 	})
 
@@ -234,8 +239,8 @@ func TestTechDiagram(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(got), `<text class="empty">(none)</text>`) {
-			t.Fatalf("svg %s", got)
+		if string(got) != "(none)\n" || bytes.Contains(got, []byte("flowchart")) {
+			t.Fatalf("diagram %q", got)
 		}
 	})
 
@@ -250,9 +255,9 @@ func TestTechDiagram(t *testing.T) {
 		if bytes.Contains(got, []byte{0x01}) {
 			t.Fatalf("control rune kept %s", got)
 		}
-		svg := string(got)
-		if !strings.Contains(svg, "Java Spring") || !strings.Contains(svg, ">Backend</text>") || !strings.Contains(svg, ">AB</text>") || !strings.Contains(svg, ">CD</text>") {
-			t.Fatalf("svg %s", svg)
+		md := string(got)
+		if !strings.Contains(md, `n1["Java Spring"]:::must`) || !strings.Contains(md, `n2["Backend"]:::target`) || !strings.Contains(md, `n3["AB"]:::advantage`) || !strings.Contains(md, `n4["CD"]:::target`) {
+			t.Fatalf("diagram\n%s", md)
 		}
 	})
 
@@ -268,16 +273,18 @@ func techPtr(s string) *string {
 	return &s
 }
 
-func techGroup(t *testing.T, svg, id string) string {
-	t.Helper()
-	start := strings.Index(svg, `<g id="`+id+`"`)
-	if start < 0 {
-		t.Fatalf("missing %s\n%s", id, svg)
+func flowchartFile(lines ...string) string {
+	var b strings.Builder
+	b.WriteString("```mermaid\n")
+	b.WriteString(flowchartInit)
+	b.WriteString("\nflowchart LR\n")
+	b.WriteString("    classDef must fill:#3A3A3A,stroke:#3A3A3A,color:#F2F2F2,stroke-width:1px\n")
+	b.WriteString("    classDef advantage fill:#F2F2F2,stroke:#3A3A3A,color:#262626,stroke-width:2px\n")
+	b.WriteString("    classDef target fill:#D5D5D5,stroke:#6E6E6E,color:#262626,stroke-width:1px\n")
+	for _, line := range lines {
+		b.WriteString(line)
+		b.WriteByte('\n')
 	}
-	rest := svg[start:]
-	end := strings.Index(rest, "</g>")
-	if end < 0 {
-		t.Fatalf("unclosed %s\n%s", id, svg)
-	}
-	return rest[:end]
+	b.WriteString("```\n")
+	return b.String()
 }
