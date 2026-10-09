@@ -3113,6 +3113,9 @@ func TestParseBatch(t *testing.T) {
 		assertPerm(t, filepath.Join(dir, "batch"), 0o755)
 		assertPerm(t, jobads, 0o755)
 		assertPerm(t, filepath.Join(dir, "batch", "jobads", "parsed"), 0o700)
+		if _, err := os.Lstat(filepath.Join(dir, "batch", "jobads", "analyzed")); !os.IsNotExist(err) {
+			t.Fatalf("parse --batch created analyzed: %v", err)
+		}
 		if got, err := os.ReadFile(filepath.Join(jobads, "keep.html")); err != nil || string(got) != string(keep) {
 			t.Fatalf("keep.html %q err %v", got, err)
 		}
@@ -4035,8 +4038,11 @@ func TestAnalyzeUsage(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  gemini-key\n  analyze --json PATH\n") {
+	if !strings.Contains(usageText, "\n  gemini-key\n  analyze --json PATH\n  analyze --batch\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
+	}
+	if !strings.Contains(usageText, "\n  --batch          analyze every .json file in ./batch/jobads/parsed\n") {
+		t.Fatalf("usage batch flag:\n%s", usageText)
 	}
 }
 
@@ -4079,6 +4085,672 @@ func TestAnalyzeJSONTooLarge(t *testing.T) {
 		if code != 1 || stdout != "" || !strings.Contains(stderr, "docs-cli: error:") || strings.Contains(stderr, errJSONTooLarge) {
 			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 		}
+	})
+}
+
+func batchJob(req string) jobad.Document {
+	return jobad.Document{
+		Source:       "source-token-9f3a.html",
+		Header:       jobad.Header{TitleBlock: "System Analyst", Company: "COMPANY-TOKEN"},
+		Requirements: []string{req},
+		Trailer:      []string{"TRAILER-SENTINEL"},
+	}
+}
+
+func batchModel(must string) string {
+	return `{"must_have":["` + must + `"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[],"soft_skills":[]}`
+}
+
+func analysisFileBytes(t *testing.T, model string) []byte {
+	t.Helper()
+	parsed, err := jobad.ParseAnalysis([]byte(model))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := writeIndentedJSON(&buf, parsed); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func jobFileBytes(t *testing.T, doc jobad.Document) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := writeIndentedJSON(&buf, doc); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func makeParsed(t *testing.T, dir string) string {
+	t.Helper()
+	parsed := filepath.Join(dir, "batch", "jobads", "parsed")
+	if err := os.MkdirAll(parsed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(dir, "batch"),
+		filepath.Join(dir, "batch", "jobads"),
+		parsed,
+	} {
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return parsed
+}
+
+func assertAbsent(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("%s exists: %v", path, err)
+	}
+}
+
+func assertFileBytes(t *testing.T, path string, want []byte) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("%s %q err %v", path, got, err)
+	}
+}
+
+func TestAnalyzeBatch(t *testing.T) {
+	const apiKey = "batch-analyze-key"
+
+	t.Run("writes analysis and moves json", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		roleBody := jobFileBytes(t, batchJob("Know Role"))
+		aBody := jobFileBytes(t, batchJob("Know A"))
+		keep := []byte("KEEP-TXT")
+		skip := []byte("SKIP-JSON")
+		notes := []byte("NOTES")
+		writeAt(t, filepath.Join(parsed, "a.json"), aBody)
+		writeAt(t, filepath.Join(parsed, "Role.JSON"), roleBody)
+		writeAt(t, filepath.Join(parsed, "keep.txt"), keep)
+		writeAt(t, filepath.Join(parsed, "nested", "skip.json"), skip)
+		writeAt(t, filepath.Join(parsed, "notes.md"), notes)
+
+		roleModel := batchModel("Know Role")
+		aModel := batchModel("Know A")
+		var calls [][]string
+		scriptedFM(t, &calls,
+			fmStep{}, fmStep{stdout: roleModel + "\n"},
+			fmStep{}, fmStep{stdout: aModel + "\n"},
+		)
+		tty := &fakeTTY{terminal: true, secrets: []string{"should-not-ask"}}
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			TTY:          tty,
+			GeminiClient: blockGemini(t),
+		})
+		if code != 0 || stderr != "" {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		roleAbs, err := filepath.Abs(filepath.Join(analyzed, "Role-analysis.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		aAbs, err := filepath.Abs(filepath.Join(analyzed, "a-analysis.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stdout != roleAbs+"\n"+aAbs+"\n" {
+			t.Fatalf("stdout %q", stdout)
+		}
+		if strings.Contains(stdout, "must_have") || strings.Contains(stdout, "COMPANY-TOKEN") {
+			t.Fatalf("stdout printed json %q", stdout)
+		}
+		assertFileBytes(t, filepath.Join(analyzed, "Role-analysis.json"), analysisFileBytes(t, roleModel))
+		assertFileBytes(t, filepath.Join(analyzed, "a-analysis.json"), analysisFileBytes(t, aModel))
+		assertFileBytes(t, filepath.Join(analyzed, "Role.JSON"), roleBody)
+		assertFileBytes(t, filepath.Join(analyzed, "a.json"), aBody)
+		assertPerm(t, filepath.Join(analyzed, "Role-analysis.json"), 0o600)
+		assertPerm(t, filepath.Join(analyzed, "a-analysis.json"), 0o600)
+		assertAbsent(t, filepath.Join(parsed, "Role.JSON"))
+		assertAbsent(t, filepath.Join(parsed, "a.json"))
+		assertFileBytes(t, filepath.Join(parsed, "keep.txt"), keep)
+		assertFileBytes(t, filepath.Join(parsed, "notes.md"), notes)
+		assertFileBytes(t, filepath.Join(parsed, "nested", "skip.json"), skip)
+		assertAbsent(t, filepath.Join(analyzed, "keep.txt"))
+		assertAbsent(t, filepath.Join(analyzed, "skip.json"))
+		assertPerm(t, analyzed, 0o700)
+		assertPerm(t, filepath.Join(dir, "batch"), 0o755)
+		assertPerm(t, filepath.Join(dir, "batch", "jobads"), 0o755)
+		assertPerm(t, parsed, 0o755)
+		if len(calls) != 4 || calls[0][1] != "available" || calls[1][1] != "respond" {
+			t.Fatalf("calls %#v", calls)
+		}
+		if len(tty.prompts) != 0 {
+			t.Fatalf("prompted %q", tty.prompts)
+		}
+		for _, path := range []string{
+			filepath.Join(analyzed, "Role-analysis.json"),
+			filepath.Join(analyzed, "a-analysis.json"),
+		} {
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(got, []byte("COMPANY-TOKEN")) || bytes.Contains(got, []byte("TRAILER-SENTINEL")) || bytes.Contains(got, []byte(apiKey)) {
+				t.Fatalf("%s contains a field that stays out of analysis %s", path, got)
+			}
+		}
+		assertRefreshUntouched(t)
+		assertNoSecret(t, stdout, stderr, apiKey)
+	})
+
+	t.Run("no json still creates analyzed", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		keep := []byte("KEEP-TXT")
+		writeAt(t, filepath.Join(parsed, "keep.txt"), keep)
+		var calls [][]string
+		scriptedFM(t, &calls)
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || stderr != errNoBatchJSON+"\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		assertPerm(t, analyzed, 0o700)
+		assertFileBytes(t, filepath.Join(parsed, "keep.txt"), keep)
+		assertPerm(t, filepath.Join(dir, "batch"), 0o755)
+		assertPerm(t, filepath.Join(dir, "batch", "jobads"), 0o755)
+		assertPerm(t, parsed, 0o755)
+	})
+
+	t.Run("parsed missing", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		if err := os.MkdirAll(jobads, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(dir, "batch"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(jobads, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var calls [][]string
+		scriptedFM(t, &calls)
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || stderr != errParsedDirMissing+"\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+		assertAbsent(t, filepath.Join(jobads, "parsed"))
+		assertAbsent(t, filepath.Join(jobads, "analyzed"))
+		assertPerm(t, jobads, 0o755)
+	})
+
+	t.Run("parsed is a file", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		marker := []byte("parsed-file")
+		writeAt(t, filepath.Join(jobads, "parsed"), marker)
+		var calls [][]string
+		scriptedFM(t, &calls)
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: not a directory: " + filepath.Join("batch", "jobads", "parsed") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(jobads, "parsed"), marker)
+		assertAbsent(t, filepath.Join(jobads, "analyzed"))
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("parsed is a symlink", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		if err := os.MkdirAll(jobads, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		real := filepath.Join(dir, "real")
+		body := jobFileBytes(t, batchJob("Know A"))
+		writeAt(t, filepath.Join(real, "a.json"), body)
+		if err := os.Symlink(real, filepath.Join(jobads, "parsed")); err != nil {
+			t.Fatal(err)
+		}
+		var calls [][]string
+		scriptedFM(t, &calls)
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: not a directory: " + filepath.Join("batch", "jobads", "parsed") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(real, "a.json"), body)
+		assertAbsent(t, filepath.Join(jobads, "analyzed"))
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("analyzed is a file", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		body := jobFileBytes(t, batchJob("Know A"))
+		writeAt(t, filepath.Join(parsed, "a.json"), body)
+		marker := []byte("analyzed-file")
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		writeAt(t, analyzed, marker)
+		var calls [][]string
+		scriptedFM(t, &calls)
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: not a directory: " + filepath.Join("batch", "jobads", "analyzed") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, analyzed, marker)
+		assertFileBytes(t, filepath.Join(parsed, "a.json"), body)
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("analyzed is a symlink", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		body := jobFileBytes(t, batchJob("Know A"))
+		writeAt(t, filepath.Join(parsed, "a.json"), body)
+		marker := []byte("symlink-target")
+		target := writeAt(t, filepath.Join(dir, "marker"), marker)
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		if err := os.Symlink(target, analyzed); err != nil {
+			t.Fatal(err)
+		}
+		var calls [][]string
+		scriptedFM(t, &calls)
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: not a directory: " + filepath.Join("batch", "jobads", "analyzed") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		got, err := os.Readlink(analyzed)
+		if err != nil || got != target {
+			t.Fatalf("symlink %q err %v", got, err)
+		}
+		assertFileBytes(t, target, marker)
+		assertFileBytes(t, filepath.Join(parsed, "a.json"), body)
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("existing analyzed mode stays", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		if err := os.Mkdir(analyzed, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(analyzed, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := jobFileBytes(t, batchJob("Know A"))
+		writeAt(t, filepath.Join(parsed, "a.json"), body)
+		model := batchModel("Know A")
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: model + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 0 || stderr != "" || stdout == "" {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		assertPerm(t, analyzed, 0o755)
+		assertPerm(t, parsed, 0o755)
+		assertPerm(t, filepath.Join(dir, "batch"), 0o755)
+		assertFileBytes(t, filepath.Join(analyzed, "a.json"), body)
+		assertAbsent(t, filepath.Join(parsed, "a.json"))
+	})
+
+	t.Run("usage does not create analyzed", func(t *testing.T) {
+		keyring.MockInit()
+		var calls [][]string
+		scriptedFM(t, &calls)
+		cases := [][]string{
+			{"analyze", "--batch", "--json", "job.json"},
+			{"analyze", "--json", "job.json", "--batch"},
+			{"analyze", "--batch", "extra"},
+			{"analyze", "--batch", "--json", "job.json", "extra"},
+			{"analyze", "--batch=false"},
+			{"analyze", "--batch=false", "--json", "job.json"},
+			{"analyze", "--batch", "--help"},
+			{"analyze", "--batch", "-h"},
+		}
+		for _, args := range cases {
+			dir := t.TempDir()
+			parsed := makeParsed(t, dir)
+			body := jobFileBytes(t, batchJob("Know A"))
+			writeAt(t, filepath.Join(parsed, "a.json"), body)
+			stdout, stderr, code := runBatch(t, dir, args, deps{
+				GeminiClient: blockGemini(t),
+			})
+			if code != 2 || stdout != "" || !strings.Contains(stderr, "usage: docs-cli") {
+				t.Fatalf("args %v exit %d stdout %q stderr %q", args, code, stdout, stderr)
+			}
+			assertAbsent(t, filepath.Join(dir, "batch", "jobads", "analyzed"))
+			assertFileBytes(t, filepath.Join(parsed, "a.json"), body)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("too big and symlink before fm", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		aBody := jobFileBytes(t, batchJob("Know A"))
+		writeAt(t, filepath.Join(parsed, "a.json"), aBody)
+		big := bytes.Repeat([]byte{'x'}, maxJSONBytes+1)
+		writeAt(t, filepath.Join(parsed, "b.json"), big)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: batchModel("Know A") + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: json exceeds 1 MiB: " + filepath.Join("batch", "jobads", "parsed", "b.json") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+		assertFileBytes(t, filepath.Join(parsed, "a.json"), aBody)
+		assertFileBytes(t, filepath.Join(parsed, "b.json"), big)
+		assertAbsent(t, filepath.Join(dir, "batch", "jobads", "analyzed", "a-analysis.json"))
+		assertPerm(t, filepath.Join(dir, "batch", "jobads", "analyzed"), 0o700)
+
+		dir = t.TempDir()
+		parsed = makeParsed(t, dir)
+		target := writeAt(t, filepath.Join(dir, "real.json"), aBody)
+		if err := os.Symlink(target, filepath.Join(parsed, "link.json")); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, code = runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want = "docs-cli: not a regular file: " + filepath.Join("batch", "jobads", "parsed", "link.json") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("symlink exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, target, aBody)
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("exact size is accepted", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		body := []byte(`{"requirements":[]}`)
+		padded := append(body, bytes.Repeat([]byte{' '}, maxJSONBytes-len(body))...)
+		if len(padded) != maxJSONBytes {
+			t.Fatalf("len %d", len(padded))
+		}
+		writeAt(t, filepath.Join(parsed, "exact.json"), padded)
+		var calls [][]string
+		scriptedFM(t, &calls)
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: requirements is empty\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+		assertFileBytes(t, filepath.Join(parsed, "exact.json"), padded)
+		assertAbsent(t, filepath.Join(dir, "batch", "jobads", "analyzed", "exact-analysis.json"))
+	})
+
+	t.Run("destination already exists", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		if err := os.Mkdir(analyzed, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := jobFileBytes(t, batchJob("Know A"))
+		writeAt(t, filepath.Join(parsed, "a.json"), body)
+		marker := []byte("already")
+		writeAt(t, filepath.Join(analyzed, "a-analysis.json"), marker)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: batchModel("Know A") + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: analyzed file already exists: " + filepath.Join("batch", "jobads", "analyzed", "a-analysis.json") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(analyzed, "a-analysis.json"), marker)
+		assertFileBytes(t, filepath.Join(parsed, "a.json"), body)
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+
+		dir = t.TempDir()
+		parsed = makeParsed(t, dir)
+		analyzed = filepath.Join(dir, "batch", "jobads", "analyzed")
+		if err := os.Mkdir(analyzed, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeAt(t, filepath.Join(parsed, "a.json"), body)
+		moved := []byte("moved-name")
+		writeAt(t, filepath.Join(analyzed, "a.json"), moved)
+		stdout, stderr, code = runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want = "docs-cli: analyzed file already exists: " + filepath.Join("batch", "jobads", "analyzed", "a.json") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("move dest exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(analyzed, "a.json"), moved)
+		assertFileBytes(t, filepath.Join(parsed, "a.json"), body)
+		assertAbsent(t, filepath.Join(analyzed, "a-analysis.json"))
+
+		dir = t.TempDir()
+		parsed = makeParsed(t, dir)
+		analyzed = filepath.Join(dir, "batch", "jobads", "analyzed")
+		if err := os.Mkdir(analyzed, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeAt(t, filepath.Join(parsed, "a.json"), body)
+		writeAt(t, filepath.Join(analyzed, "a-analysis.json"), marker)
+		writeAt(t, filepath.Join(analyzed, "a.json"), moved)
+		stdout, stderr, code = runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want = "docs-cli: analyzed file already exists: " + filepath.Join("batch", "jobads", "analyzed", "a-analysis.json") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("both dests exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("dot json name", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		body := []byte(`{"requirements":["Know A"]}`)
+		writeAt(t, filepath.Join(parsed, ".json"), body)
+		var calls [][]string
+		scriptedFM(t, &calls)
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: not a json file: " + filepath.Join("batch", "jobads", "parsed", ".json") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(parsed, ".json"), body)
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("invalid json stops", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		bad := []byte(`{`)
+		good := jobFileBytes(t, batchJob("Know B"))
+		writeAt(t, filepath.Join(parsed, "a.json"), bad)
+		writeAt(t, filepath.Join(parsed, "b.json"), good)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: batchModel("Know B") + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || !strings.HasPrefix(stderr, "docs-cli: error: ") || strings.Contains(stderr, errJSONTooLarge) {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(parsed, "a.json"), bad)
+		assertFileBytes(t, filepath.Join(parsed, "b.json"), good)
+		assertAbsent(t, filepath.Join(dir, "batch", "jobads", "analyzed", "a-analysis.json"))
+		assertAbsent(t, filepath.Join(dir, "batch", "jobads", "analyzed", "b-analysis.json"))
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("second file fm failure keeps the first", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		aBody := jobFileBytes(t, batchJob("Know A"))
+		bBody := jobFileBytes(t, batchJob("Know B"))
+		writeAt(t, filepath.Join(parsed, "a.json"), aBody)
+		writeAt(t, filepath.Join(parsed, "b.json"), bBody)
+		model := batchModel("Know A")
+		var calls [][]string
+		scriptedFM(t, &calls,
+			fmStep{}, fmStep{stdout: model + "\n"},
+			fmStep{stderr: "not licensed\n", code: 1},
+		)
+		hits := 0
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, batchModel("FROM-GEMINI")), &hits, &geminiCapture{}),
+		})
+		aAbs, err := filepath.Abs(filepath.Join(analyzed, "a-analysis.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code != 1 || stdout != aAbs+"\n" || stderr != "docs-cli: fm: not licensed\n" || hits != 0 {
+			t.Fatalf("exit %d hits %d stdout %q stderr %q", code, hits, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(analyzed, "a-analysis.json"), analysisFileBytes(t, model))
+		assertFileBytes(t, filepath.Join(analyzed, "a.json"), aBody)
+		assertFileBytes(t, filepath.Join(parsed, "b.json"), bBody)
+		assertAbsent(t, filepath.Join(parsed, "a.json"))
+		assertAbsent(t, filepath.Join(analyzed, "b-analysis.json"))
+		assertAbsent(t, filepath.Join(analyzed, "b.json"))
+		if len(calls) != 3 {
+			t.Fatalf("calls %#v", calls)
+		}
+		assertRefreshUntouched(t)
+		if _, err := keyring.Get("docs-cli", "gemini-api-key"); !errors.Is(err, keyring.ErrNotFound) {
+			t.Fatalf("key stored, err %v", err)
+		}
+	})
+
+	t.Run("empty requirements stops before fm", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		aBody := jobFileBytes(t, jobad.Document{Requirements: []string{}})
+		bBody := jobFileBytes(t, batchJob("Know B"))
+		writeAt(t, filepath.Join(parsed, "a.json"), aBody)
+		writeAt(t, filepath.Join(parsed, "b.json"), bBody)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: batchModel("Know B") + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: requirements is empty\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(parsed, "a.json"), aBody)
+		assertFileBytes(t, filepath.Join(parsed, "b.json"), bBody)
+		assertAbsent(t, filepath.Join(dir, "batch", "jobads", "analyzed", "a-analysis.json"))
+		assertAbsent(t, filepath.Join(dir, "batch", "jobads", "analyzed", "b-analysis.json"))
+		if len(calls) != 0 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("single analyze does not use the batch folders", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		body := jobFileBytes(t, batchJob("Know Go"))
+		path := writeAt(t, filepath.Join(dir, "job.json"), body)
+		model := batchModel("Know Go")
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: model + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 0 || stderr != "" || stdout != string(analysisFileBytes(t, model)) {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		assertAbsent(t, filepath.Join(dir, "batch"))
+		assertFileBytes(t, path, body)
+		if len(calls) != 2 {
+			t.Fatalf("calls %#v", calls)
+		}
+		assertRefreshUntouched(t)
 	})
 }
 
@@ -4581,7 +5253,7 @@ func TestDraftUsage(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  analyze --json PATH\n  draft --json PATH --template PATH --cv PATH [--pdf NAME]\n") {
+	if !strings.Contains(usageText, "\n  analyze --json PATH\n  analyze --batch\n  draft --json PATH --template PATH --cv PATH [--pdf NAME]\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
 	}
 	if !strings.Contains(usageText, "\n  --template PATH  cover-letter template PDF\n  --cv PATH        CV or resume PDF\n  --pdf NAME       PDF file name in drafts; omitted means a timestamped .txt file\n") {
