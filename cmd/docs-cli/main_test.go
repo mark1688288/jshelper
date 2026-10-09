@@ -376,6 +376,7 @@ func assertPauseSkipsWork(t *testing.T, args []string) {
 
 const folderID = "1AbC_def-234"
 const secretValue = "super-secret-value"
+const sentinelCredentials = "keep-these-credentials-bytes\n"
 
 func exampleEnv() string {
 	return `APP_ENV=development
@@ -774,12 +775,20 @@ func TestCreateFlagFolderOverridesEnv(t *testing.T) {
 		gotTitle, gotBody, gotFolder, gotIndex = title, body, folder, index
 	})
 	base.Load = nil
+	base.WriteCredentials = func(*config.Config) error {
+		calls.write++
+		return os.WriteFile(filepath.Join(dir, "credentials.json"), []byte("rewritten\n"), 0o600)
+	}
 	base.Authorize = func(_ context.Context, _ *config.Config, opt oauth.Options) (*oauth2.Token, error) {
 		calls.auth++
 		if opt.Force {
 			t.Fatal("Force")
 		}
 		return &oauth2.Token{AccessToken: "access-token-value"}, nil
+	}
+	credPath := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(credPath, []byte(sentinelCredentials), 0o640); err != nil {
+		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
 	base.Stdin = failReader{t: t}
@@ -794,8 +803,27 @@ func TestCreateFlagFolderOverridesEnv(t *testing.T) {
 	if gotFolder != flagFolder || gotTitle != "Untitled" || gotBody != " hello " || gotIndex != 1 {
 		t.Fatalf("title %q body %q folder %q index %d", gotTitle, gotBody, gotFolder, gotIndex)
 	}
-	if calls.load != 0 || calls.ensure != 0 || calls.create != 1 || calls.auth != 1 {
+	if calls.load != 0 || calls.ensure != 0 || calls.create != 1 || calls.auth != 1 || calls.write != 0 {
 		t.Fatalf("calls %+v", calls)
+	}
+	if strings.Contains(stderr.String(), "docs-cli: wrote credentials.json") {
+		t.Fatalf("stderr %s", stderr.String())
+	}
+	gotCred, err := os.ReadFile(credPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotCred) != sentinelCredentials {
+		t.Fatalf("credentials rewritten: %s", gotCred)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(credPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o640 {
+			t.Fatalf("credentials perm=%o", info.Mode().Perm())
+		}
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -944,6 +972,9 @@ func TestCreateSuccessStdout(t *testing.T) {
 	if !strings.Contains(text, "docs-cli: mode=development file=.env.example") || !strings.Contains(text, "docs-cli: created document "+docID) || !strings.Contains(text, "docs-cli: body_bytes=5") {
 		t.Fatalf("stderr %s", text)
 	}
+	if strings.Contains(text, "docs-cli: wrote credentials.json") {
+		t.Fatalf("stderr %s", text)
+	}
 	if gotFolder != folderID || gotTitle != "Untitled" || gotBody != "hello" {
 		t.Fatalf("title %q body %q folder %q", gotTitle, gotBody, gotFolder)
 	}
@@ -953,22 +984,70 @@ func TestCreateSuccessStdout(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
 		t.Fatalf(".env: %v", err)
 	}
-	credPath := filepath.Join(dir, "credentials.json")
-	if runtime.GOOS != "windows" {
-		info, err := os.Stat(credPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Fatalf("perm %o", info.Mode().Perm())
-		}
+	if _, err := os.Stat(filepath.Join(dir, "credentials.json")); !os.IsNotExist(err) {
+		t.Fatalf("credentials: %v", err)
 	}
-	cred, err := os.ReadFile(credPath)
-	if err != nil {
+}
+
+func TestCreateAndUploadIgnoreCredentialsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "ok.pdf"), []byte("%PDF-1.4\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(cred, []byte("refresh")) || bytes.Contains(cred, []byte(raw)) {
-		t.Fatalf("credentials %s", cred)
+	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "cred-target")
+	if err := os.WriteFile(target, []byte("untouched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "credentials.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Mode:            "development",
+		FilePath:        "/tmp/.env.example",
+		DriveFolderID:   folderID,
+		DefaultTitle:    "Untitled",
+		InsertIndex:     1,
+		ClientID:        "abc.apps.googleusercontent.com",
+		ClientSecret:    secretValue,
+		CredentialsPath: link,
+	}
+	cases := [][]string{
+		{"create", "--title", "Demo", "--text", "hello"},
+		{"create", "--import", "ok.pdf"},
+		{"upload", "1.json"},
+	}
+	for _, args := range cases {
+		var calls callCount
+		base := calls.hooks(cfg, "doc1234567890", nil, nil)
+		base.WriteCredentials = nil
+		base.ImportPDF = func(context.Context, string, string, []byte) (string, error) {
+			return "doc1234567890", nil
+		}
+		base.UploadJSON = func(context.Context, string, []docs.JSONFile) ([]string, error) {
+			return []string{"id-1"}, nil
+		}
+		var stdout, stderr bytes.Buffer
+		base.Stdout = &stdout
+		base.Stderr = &stderr
+		base.Environ = []string{"APP_ENV=development"}
+		base.Root = dir
+		code := run(args, base)
+		if code != 0 || strings.Contains(stderr.String(), "symlink") || strings.Contains(stderr.String(), "docs-cli: wrote credentials.json") {
+			t.Fatalf("args %v exit %d stderr %s", args, code, stderr.String())
+		}
+	}
+	info, err := os.Lstat(link)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link: %v mode %v", err, info)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "untouched\n" {
+		t.Fatalf("target %q err %v", got, err)
 	}
 }
 
@@ -1223,6 +1302,14 @@ func TestCreateImportSuccess(t *testing.T) {
 		got = append([]byte(nil), pdf...)
 		return docID, nil
 	}
+	credPath := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(credPath, []byte(sentinelCredentials), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	base.WriteCredentials = func(*config.Config) error {
+		calls.write++
+		return os.WriteFile(credPath, []byte("rewritten\n"), 0o600)
+	}
 	var stdout, stderr bytes.Buffer
 	base.Stdin = failReader{t: t}
 	base.Stdout = &stdout
@@ -1239,10 +1326,9 @@ func TestCreateImportSuccess(t *testing.T) {
 	}
 	text := stderr.String()
 	imported := "docs-cli: imported " + relPath + " bytes=" + fmt.Sprint(len(payload))
-	credAt := strings.Index(text, "docs-cli: wrote credentials.json")
 	importedAt := strings.Index(text, imported)
 	createdAt := strings.Index(text, "docs-cli: created document "+docID)
-	if credAt < 0 || importedAt < credAt || createdAt < importedAt {
+	if strings.Contains(text, "docs-cli: wrote credentials.json") || importedAt < 0 || createdAt < importedAt {
 		t.Fatalf("stderr %s", text)
 	}
 	if strings.Contains(text, "body_bytes") || strings.Contains(text, "SENTINEL-PDF") || strings.Contains(stdout.String(), "SENTINEL-PDF") {
@@ -1257,8 +1343,24 @@ func TestCreateImportSuccess(t *testing.T) {
 	if gotTitle != "From Env" || gotFolder != folderID || string(got) != payload {
 		t.Fatalf("title %q folder %q pdf %q", gotTitle, gotFolder, got)
 	}
-	if calls.load != 1 || calls.ensure != 0 || calls.auth != 1 || calls.create != 0 || calls.require != 1 || calls.write != 1 {
+	if calls.load != 1 || calls.ensure != 0 || calls.auth != 1 || calls.create != 0 || calls.require != 1 || calls.write != 0 {
 		t.Fatalf("calls %+v", calls)
+	}
+	gotCred, err := os.ReadFile(credPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotCred) != sentinelCredentials {
+		t.Fatalf("credentials rewritten: %s", gotCred)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(credPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o640 {
+			t.Fatalf("credentials perm=%o", info.Mode().Perm())
+		}
 	}
 	disk, err := os.ReadFile(relPath)
 	if err != nil {
@@ -5214,6 +5316,14 @@ func TestUploadWritesBothFiles(t *testing.T) {
 		got = append([]docs.JSONFile(nil), files...)
 		return []string{"id-one", "id-two"}, nil
 	}
+	credPath := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(credPath, []byte(sentinelCredentials), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	base.WriteCredentials = func(*config.Config) error {
+		calls.write++
+		return os.WriteFile(credPath, []byte("rewritten\n"), 0o600)
+	}
 	var stdout, stderr bytes.Buffer
 	base.Stdout = &stdout
 	base.Stderr = &stderr
@@ -5230,7 +5340,8 @@ func TestUploadWritesBothFiles(t *testing.T) {
 		t.Fatalf("stdout %q", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "docs-cli: uploaded ./tmp/1.json bytes="+fmt.Sprint(len(one))) ||
-		!strings.Contains(stderr.String(), "docs-cli: uploaded ./tmp/2.json bytes="+fmt.Sprint(len(two))) {
+		!strings.Contains(stderr.String(), "docs-cli: uploaded ./tmp/2.json bytes="+fmt.Sprint(len(two))) ||
+		strings.Contains(stderr.String(), "docs-cli: wrote credentials.json") {
 		t.Fatalf("stderr %s", stderr.String())
 	}
 	if strings.Contains(stdout.String(), "SENTINEL-ONE") || strings.Contains(stderr.String(), "SENTINEL-ONE") || strings.Contains(stderr.String(), geminiItem) {
@@ -5246,8 +5357,24 @@ func TestUploadWritesBothFiles(t *testing.T) {
 		!bytes.Equal(got[0].Body, one) || !bytes.Equal(got[1].Body, two) {
 		t.Fatalf("folder %q files %#v", gotFolder, got)
 	}
-	if calls.load != 1 || calls.ensure != 0 || calls.auth != 1 || calls.create != 0 || calls.require != 1 || calls.write != 1 {
+	if calls.load != 1 || calls.ensure != 0 || calls.auth != 1 || calls.create != 0 || calls.require != 1 || calls.write != 0 {
 		t.Fatalf("calls %+v", calls)
+	}
+	gotCred, err := os.ReadFile(credPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotCred) != sentinelCredentials {
+		t.Fatalf("credentials rewritten: %s", gotCred)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(credPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o640 {
+			t.Fatalf("credentials perm=%o", info.Mode().Perm())
+		}
 	}
 	disk, err := os.ReadFile(filepath.Join(dir, "tmp", "1.json"))
 	if err != nil {

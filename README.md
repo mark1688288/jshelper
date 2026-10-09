@@ -77,7 +77,7 @@ The program does not open a browser on its own. A successful `auth` overwrites t
 
 `docs-cli` stores the refresh token with [zalando/go-keyring](https://github.com/zalando/go-keyring) as Keychain item `docs-cli` / `refresh-token`. The payload is JSON with `refresh_token` and `scope`. Access tokens stay in memory. The refresh token is not a file in the project directory, so it is not committed.
 
-That keyring item is the user grant. `credentials.json` is a different file: the Google installed Desktop client (`client_id`, `client_secret`, token URLs), derived from `.env`. Token exchange and refresh read the client id and secret from the env file. `setup`, `auth`, and `create` rewrite `credentials.json` (mode `0600`) as that installed-app copy. It is gitignored. The client secret stays in `.env` and `credentials.json`; it does not go in the keyring.
+That keyring item is the user grant. `credentials.json` is a different file: the Google installed Desktop client (`client_id`, `client_secret`, token URLs), derived from `.env`. Token exchange and refresh read the client id and secret from the env file. `setup` and `auth` rewrite `credentials.json` (mode `0600`) as that installed-app copy. `create` and `upload` do not write that file. It is gitignored. The client secret stays in `.env` and `credentials.json`; it does not go in the keyring.
 
 On macOS, go-keyring writes to Keychain. Keychain encrypts the item at rest and unlocks it with your login. The first `auth` may ask for permission. The application does not add its own encryption.
 
