@@ -1635,8 +1635,11 @@ func TestParseUsage(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  parse --html PATH [--autoparse]\n  parse --txt PATH\n  gemini-key\n") {
+	if !strings.Contains(usageText, "\n  parse --html PATH [--autoparse]\n  parse --txt PATH\n  parse --batch\n  gemini-key\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
+	}
+	if !strings.Contains(usageText, "\n  --batch          parse every .txt file in ./batch/jobads\n") {
+		t.Fatalf("usage batch flag:\n%s", usageText)
 	}
 }
 
@@ -2797,6 +2800,98 @@ func assertAutoparseRequest(t *testing.T, cap *geminiCapture, apiKey, page strin
 	}
 }
 
+func runBatch(t *testing.T, dir string, args []string, d deps) (string, string, int) {
+	t.Helper()
+	t.Chdir(dir)
+	var stdout, stderr bytes.Buffer
+	d.Stdout = &stdout
+	d.Stderr = &stderr
+	if d.Stdin == nil {
+		d.Stdin = strings.NewReader("")
+	}
+	forbidEnv(t, &d)
+	code := run(args, d)
+	return stdout.String(), stderr.String(), code
+}
+
+func writeAt(t *testing.T, path string, body []byte) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func assertPerm(t *testing.T, path string, perm os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	if info.Mode().Perm() != perm {
+		t.Fatalf("%s perm %o want %o", path, info.Mode().Perm(), perm)
+	}
+}
+
+type geminiStep struct {
+	status int
+	body   string
+}
+
+func scriptedGemini(t *testing.T, caps *[]geminiCapture, steps ...geminiStep) *http.Client {
+	t.Helper()
+	n := 0
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		*caps = append(*caps, geminiCapture{
+			url:    r.URL.String(),
+			header: r.Header.Clone(),
+			body:   string(body),
+		})
+		if n >= len(steps) {
+			t.Errorf("extra gemini call")
+			return nil, errors.New("extra gemini call")
+		}
+		step := steps[n]
+		n++
+		return &http.Response{
+			StatusCode: step.status,
+			Status:     fmt.Sprintf("%d %s", step.status, http.StatusText(step.status)),
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(step.body)),
+			Request:    r,
+		}, nil
+	})}
+}
+
+func autoparseDocEnvelope(t *testing.T, title, duty string) string {
+	t.Helper()
+	model, err := json.Marshal(map[string]any{
+		"source": "LEAK-SOURCE",
+		"header": map[string]any{
+			"title_block":    title,
+			"company":        "",
+			"location":       "",
+			"work_type":      "",
+			"classification": "",
+		},
+		"benefits":     []string{},
+		"duties":       []string{duty},
+		"requirements": []string{"Know stores"},
+		"trailer":      []string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return analysisEnvelope(t, string(model))
+}
+
 func runParseArgs(t *testing.T, args []string, tty config.TTY) (string, string, int) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
@@ -2810,6 +2905,619 @@ func runParseArgs(t *testing.T, args []string, tty config.TTY) (string, string, 
 	forbidEnv(t, &d)
 	code := run(args, d)
 	return stdout.String(), stderr.String(), code
+}
+
+func TestParseBatch(t *testing.T) {
+	const apiKey = "batch-gemini-key"
+	const email = "person@example.com"
+	var fmCalls [][]string
+	scriptedFM(t, &fmCalls)
+
+	t.Run("writes parsed json and moves txt", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		if err := os.MkdirAll(jobads, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(dir, "batch"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(jobads, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		role := []byte("ROLE-JOB\nLead stores\n")
+		aBody := []byte("A-JOB\nWrite to " + email + " today\n")
+		bBody := []byte("B-JOB\nBuy supplies\n")
+		keep := []byte("KEEP-HTML")
+		skip := []byte("SKIP-TXT")
+		notes := []byte("NOTES")
+		writeAt(t, filepath.Join(jobads, "b.txt"), bBody)
+		writeAt(t, filepath.Join(jobads, "Role.TXT"), role)
+		writeAt(t, filepath.Join(jobads, "a.txt"), aBody)
+		writeAt(t, filepath.Join(jobads, "keep.html"), keep)
+		writeAt(t, filepath.Join(jobads, "nested", "skip.txt"), skip)
+		writeAt(t, filepath.Join(jobads, "notes.md"), notes)
+
+		names := []string{"Role.TXT", "a.txt", "b.txt"}
+		titles := []string{"Role", "Alpha", "Beta"}
+		duties := []string{"Lead stores", "Write today", "Buy supplies"}
+		bodies := [][]byte{role, aBody, bBody}
+		var steps []geminiStep
+		for i := range names {
+			steps = append(steps, geminiStep{status: http.StatusOK, body: autoparseDocEnvelope(t, titles[i], duties[i])})
+		}
+		var caps []geminiCapture
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: scriptedGemini(t, &caps, steps...),
+		})
+		if code != 0 || stderr != "" {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		var lines []string
+		for i, name := range names {
+			stem := strings.TrimSuffix(name, filepath.Ext(name))
+			jsonName := stem + ".json"
+			jsonPath := filepath.Join(dir, "batch", "jobads", "parsed", jsonName)
+			abs, err := filepath.Abs(jsonPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines = append(lines, abs)
+			want := jobad.Document{
+				Source:       filepath.Join("batch", "jobads", name),
+				Header:       jobad.Header{TitleBlock: titles[i]},
+				Benefits:     []string{},
+				Duties:       []string{duties[i]},
+				Requirements: []string{"Know stores"},
+				Trailer:      []string{},
+			}
+			var buf bytes.Buffer
+			if err := writeIndentedJSON(&buf, want); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(jsonPath)
+			if err != nil || string(got) != buf.String() {
+				t.Fatalf("%s json %q want %q err %v", name, got, buf.String(), err)
+			}
+			if strings.Contains(string(got), "LEAK-SOURCE") || strings.Contains(string(got), email) || strings.Contains(string(got), apiKey) {
+				t.Fatalf("json %s", got)
+			}
+			info, err := os.Stat(jsonPath)
+			if err != nil || info.Mode().Perm() != 0o600 {
+				t.Fatalf("%s perm %v err %v", jsonName, info, err)
+			}
+			moved := filepath.Join(dir, "batch", "jobads", "parsed", name)
+			kept, err := os.ReadFile(moved)
+			if err != nil || string(kept) != string(bodies[i]) {
+				t.Fatalf("moved %s %q err %v", name, kept, err)
+			}
+			if _, err := os.Lstat(filepath.Join(jobads, name)); !os.IsNotExist(err) {
+				t.Fatalf("%s still in jobads: %v", name, err)
+			}
+		}
+		if stdout != strings.Join(lines, "\n")+"\n" {
+			t.Fatalf("stdout %q", stdout)
+		}
+		if strings.Contains(stdout, "benefits") || strings.Contains(stdout, "Know stores") {
+			t.Fatalf("stdout printed json %q", stdout)
+		}
+		assertPerm(t, filepath.Join(dir, "batch"), 0o755)
+		assertPerm(t, jobads, 0o755)
+		assertPerm(t, filepath.Join(dir, "batch", "jobads", "parsed"), 0o700)
+		if got, err := os.ReadFile(filepath.Join(jobads, "keep.html")); err != nil || string(got) != string(keep) {
+			t.Fatalf("keep.html %q err %v", got, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "nested", "skip.txt")); err != nil || string(got) != string(skip) {
+			t.Fatalf("skip.txt %q err %v", got, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "notes.md")); err != nil || string(got) != string(notes) {
+			t.Fatalf("notes %q err %v", got, err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "batch", "jobads", "parsed", "skip.txt")); !os.IsNotExist(err) {
+			t.Fatalf("nested txt was parsed: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(testDraftRoot, "batch")); !os.IsNotExist(err) {
+			t.Fatalf("batch under draft root: %v", err)
+		}
+		if len(caps) != len(names) {
+			t.Fatalf("gemini calls %d", len(caps))
+		}
+		for i := range names {
+			assertAutoparseRequest(t, &caps[i], apiKey, string(bodies[i]))
+			if !strings.Contains(caps[i].body, []string{"ROLE-JOB", "A-JOB", "B-JOB"}[i]) {
+				t.Fatalf("call %d body %s", i, caps[i].body)
+			}
+		}
+		assertRefreshUntouched(t)
+		assertNoSecret(t, stdout, stderr, apiKey)
+	})
+
+	t.Run("no txt", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		tty := &fakeTTY{terminal: true, secrets: []string{apiKey}}
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			TTY:          tty,
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || stderr != errNoBatchTxt+"\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(tty.prompts) != 0 {
+			t.Fatalf("prompted %q", tty.prompts)
+		}
+		assertPerm(t, filepath.Join(dir, "batch"), 0o700)
+		assertPerm(t, filepath.Join(dir, "batch", "jobads"), 0o700)
+		assertPerm(t, filepath.Join(dir, "batch", "jobads", "parsed"), 0o700)
+		if _, err := keyring.Get("docs-cli", "gemini-api-key"); !errors.Is(err, keyring.ErrNotFound) {
+			t.Fatalf("keyring err %v", err)
+		}
+	})
+
+	t.Run("non txt stays", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		keep := []byte("KEEP-HTML")
+		skip := []byte("SKIP-TXT")
+		writeAt(t, filepath.Join(jobads, "keep.html"), keep)
+		writeAt(t, filepath.Join(jobads, "nested", "skip.txt"), skip)
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || stderr != errNoBatchTxt+"\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "keep.html")); err != nil || string(got) != string(keep) {
+			t.Fatalf("keep %q err %v", got, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "nested", "skip.txt")); err != nil || string(got) != string(skip) {
+			t.Fatalf("skip %q err %v", got, err)
+		}
+	})
+
+	t.Run("usage does not create batch", func(t *testing.T) {
+		keyring.MockInit()
+		cases := [][]string{
+			{"parse", "--batch", "--txt", "job.txt"},
+			{"parse", "--batch", "--html", "page.html"},
+			{"parse", "--batch", "--autoparse"},
+			{"parse", "--batch", "extra"},
+			{"parse", "--batch", "--html", "page.html", "extra"},
+			{"parse", "--batch", "--html", "page.html", "--autoparse"},
+			{"parse", "--batch", "--help"},
+			{"parse", "--batch=false"},
+			{"parse", "--batch=false", "--txt", "job.txt"},
+		}
+		for _, args := range cases {
+			dir := t.TempDir()
+			stdout, stderr, code := runBatch(t, dir, args, deps{GeminiClient: blockGemini(t)})
+			if code != 2 || stdout != "" || !strings.Contains(stderr, "usage: docs-cli") {
+				t.Fatalf("args %v exit %d stdout %q stderr %q", args, code, stdout, stderr)
+			}
+			if _, err := os.Lstat(filepath.Join(dir, "batch")); !os.IsNotExist(err) {
+				t.Fatalf("args %v created batch: %v", args, err)
+			}
+		}
+	})
+
+	t.Run("too large before gemini", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		small := []byte("A-JOB\n")
+		writeAt(t, filepath.Join(jobads, "a.txt"), small)
+		writeAt(t, filepath.Join(jobads, "big.txt"), bytes.Repeat([]byte{'x'}, maxHTMLBytes+1))
+		tty := &fakeTTY{terminal: true, secrets: []string{"other-key"}}
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			TTY:          tty,
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: txt exceeds 2 MiB: " + filepath.Join("batch", "jobads", "big.txt") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(tty.prompts) != 0 {
+			t.Fatalf("prompted %q", tty.prompts)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "a.txt")); err != nil || string(got) != string(small) {
+			t.Fatalf("a.txt moved %q err %v", got, err)
+		}
+	})
+
+	t.Run("exact cap", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		body := bytes.Repeat([]byte{'Q'}, maxHTMLBytes)
+		writeAt(t, filepath.Join(jobads, "exact.txt"), body)
+		var caps []geminiCapture
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: scriptedGemini(t, &caps, geminiStep{status: http.StatusOK, body: autoparseDocEnvelope(t, "Exact", "Know stores")}),
+		})
+		if code != 0 || stderr != "" {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		if len(caps) != 1 {
+			t.Fatalf("gemini calls %d", len(caps))
+		}
+		moved, err := os.ReadFile(filepath.Join(dir, "batch", "jobads", "parsed", "exact.txt"))
+		if err != nil || !bytes.Equal(moved, body) {
+			t.Fatalf("moved %d err %v", len(moved), err)
+		}
+		jsonPath := filepath.Join(dir, "batch", "jobads", "parsed", "exact.json")
+		abs, err := filepath.Abs(jsonPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stdout != abs+"\n" {
+			t.Fatalf("stdout %q", stdout)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		small := []byte("A-JOB\n")
+		writeAt(t, filepath.Join(jobads, "a.txt"), small)
+		target := writeAt(t, filepath.Join(dir, "outside.txt"), []byte("OUT\n"))
+		if err := os.Symlink(target, filepath.Join(jobads, "link.txt")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(jobads, "dir.txt"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: not a regular file: " + filepath.Join("batch", "jobads", "dir.txt") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "a.txt")); err != nil || string(got) != string(small) {
+			t.Fatalf("a.txt %q err %v", got, err)
+		}
+	})
+
+	t.Run("destination exists", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		parsed := filepath.Join(jobads, "parsed")
+		writeAt(t, filepath.Join(jobads, "a.txt"), []byte("A-JOB\n"))
+		writeAt(t, filepath.Join(jobads, "b.txt"), []byte("B-JOB\n"))
+		writeAt(t, filepath.Join(jobads, "c.txt"), []byte("C-JOB\n"))
+		writeAt(t, filepath.Join(jobads, "d.txt"), []byte("D-JOB\n"))
+		writeAt(t, filepath.Join(parsed, "a.json"), []byte("KEEP-JSON"))
+		writeAt(t, filepath.Join(parsed, "b.txt"), []byte("OLD-TXT"))
+		writeAt(t, filepath.Join(parsed, "c.json"), []byte("KEEP-C"))
+		writeAt(t, filepath.Join(parsed, "c.txt"), []byte("OLD-C"))
+		if err := os.Symlink(filepath.Join(dir, "missing"), filepath.Join(parsed, "d.json")); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want := "docs-cli: parsed file already exists: " + filepath.Join("batch", "jobads", "parsed", "a.json") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("both exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "a.txt")); err != nil || string(got) != "A-JOB\n" {
+			t.Fatalf("a.txt %q err %v", got, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(parsed, "a.json")); err != nil || string(got) != "KEEP-JSON" {
+			t.Fatalf("a.json %q err %v", got, err)
+		}
+
+		if err := os.Remove(filepath.Join(jobads, "a.txt")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(parsed, "a.json")); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, code = runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want = "docs-cli: parsed file already exists: " + filepath.Join("batch", "jobads", "parsed", "b.txt") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("txt exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+
+		if err := os.Remove(filepath.Join(jobads, "b.txt")); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, code = runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want = "docs-cli: parsed file already exists: " + filepath.Join("batch", "jobads", "parsed", "c.json") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("json first exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+
+		if err := os.Remove(filepath.Join(jobads, "c.txt")); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, code = runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		want = "docs-cli: parsed file already exists: " + filepath.Join("batch", "jobads", "parsed", "d.json") + "\n"
+		if code != 1 || stdout != "" || stderr != want {
+			t.Fatalf("symlink exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if _, err := os.Lstat(filepath.Join(jobads, "d.txt")); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("stops after rejection", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		aBody := []byte("A-JOB\nWrite to " + email + " today\n")
+		bBody := []byte("B-JOB\nBuy supplies\n")
+		cBody := []byte("C-JOB\nLater\n")
+		writeAt(t, filepath.Join(jobads, "c.txt"), cBody)
+		writeAt(t, filepath.Join(jobads, "a.txt"), aBody)
+		writeAt(t, filepath.Join(jobads, "b.txt"), bBody)
+		var caps []geminiCapture
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: scriptedGemini(t, &caps,
+				geminiStep{status: http.StatusOK, body: autoparseDocEnvelope(t, "Alpha", "Write today")},
+				geminiStep{status: http.StatusInternalServerError, body: "nope"},
+			),
+		})
+		jsonPath := filepath.Join(dir, "batch", "jobads", "parsed", "a.json")
+		abs, err := filepath.Abs(jsonPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code != 1 || stdout != abs+"\n" || stderr != "docs-cli: gemini autoparse rejected: status 500\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(caps) != 2 {
+			t.Fatalf("gemini calls %d", len(caps))
+		}
+		assertAutoparseRequest(t, &caps[0], apiKey, string(aBody))
+		if strings.Contains(caps[0].body, "B-JOB") || strings.Contains(caps[0].body, "C-JOB") || strings.Contains(caps[1].body, "C-JOB") {
+			t.Fatalf("bodies %q %q", caps[0].body, caps[1].body)
+		}
+		moved, err := os.ReadFile(filepath.Join(dir, "batch", "jobads", "parsed", "a.txt"))
+		if err != nil || string(moved) != string(aBody) {
+			t.Fatalf("moved %q err %v", moved, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "b.txt")); err != nil || string(got) != string(bBody) {
+			t.Fatalf("b.txt %q err %v", got, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "c.txt")); err != nil || string(got) != string(cBody) {
+			t.Fatalf("c.txt %q err %v", got, err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "batch", "jobads", "parsed", "b.json")); !os.IsNotExist(err) {
+			t.Fatalf("b.json: %v", err)
+		}
+		assertRefreshUntouched(t)
+		assertNoSecret(t, stdout, stderr, apiKey)
+	})
+
+	t.Run("no key non tty", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		body := []byte("A-JOB\n")
+		writeAt(t, filepath.Join(jobads, "a.txt"), body)
+		tty := &fakeTTY{terminal: false, secrets: []string{apiKey}}
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			TTY:          tty,
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || stderr != errGeminiKeyMissing+"\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(tty.prompts) != 0 {
+			t.Fatalf("prompted %q", tty.prompts)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "a.txt")); err != nil || string(got) != string(body) {
+			t.Fatalf("a.txt %q err %v", got, err)
+		}
+		entries, err := os.ReadDir(filepath.Join(jobads, "parsed"))
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("parsed %#v err %v", entries, err)
+		}
+	})
+
+	t.Run("asks once", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		writeAt(t, filepath.Join(jobads, "b.txt"), []byte("B-JOB\n"))
+		writeAt(t, filepath.Join(jobads, "a.txt"), []byte("A-JOB\n"))
+		tty := &fakeTTY{terminal: true, secrets: []string{apiKey}}
+		var caps []geminiCapture
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			TTY: tty,
+			GeminiClient: scriptedGemini(t, &caps,
+				geminiStep{status: http.StatusOK, body: autoparseDocEnvelope(t, "Alpha", "Write today")},
+				geminiStep{status: http.StatusOK, body: autoparseDocEnvelope(t, "Beta", "Buy supplies")},
+			),
+		})
+		if code != 0 || stderr != errGeminiStored+"\n" {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		if len(tty.prompts) != 1 || tty.prompts[0] != geminiKeyPrompt {
+			t.Fatalf("prompts %q", tty.prompts)
+		}
+		if len(caps) != 2 {
+			t.Fatalf("gemini calls %d", len(caps))
+		}
+		if _, err := os.Lstat(filepath.Join(jobads, "a.txt")); !os.IsNotExist(err) {
+			t.Fatalf("a.txt: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(jobads, "b.txt")); !os.IsNotExist(err) {
+			t.Fatalf("b.txt: %v", err)
+		}
+		raw, err := keyring.Get("docs-cli", "gemini-api-key")
+		if err != nil || raw != `{"api_key":"`+apiKey+`"}` {
+			t.Fatalf("stored %q err %v", raw, err)
+		}
+		assertRefreshUntouched(t)
+		assertNoSecret(t, stdout, stderr, apiKey)
+	})
+
+	t.Run("txt still writes stdout", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		body := []byte("JOB-DETAILS-SENTINEL\nBuy supplies\n")
+		writeAt(t, filepath.Join(dir, "job.txt"), body)
+		var caps []geminiCapture
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--txt", "job.txt"}, deps{
+			GeminiClient: scriptedGemini(t, &caps, geminiStep{status: http.StatusOK, body: autoparseDocEnvelope(t, "Supplies Supervisor", "Buy supplies")}),
+		})
+		if code != 0 || stderr != "" {
+			t.Fatalf("exit %d stderr %q stdout %s", code, stderr, stdout)
+		}
+		want := jobad.Document{
+			Source:       "job.txt",
+			Header:       jobad.Header{TitleBlock: "Supplies Supervisor"},
+			Benefits:     []string{},
+			Duties:       []string{"Buy supplies"},
+			Requirements: []string{"Know stores"},
+			Trailer:      []string{},
+		}
+		var buf bytes.Buffer
+		if err := writeIndentedJSON(&buf, want); err != nil {
+			t.Fatal(err)
+		}
+		if stdout != buf.String() {
+			t.Fatalf("stdout %s", stdout)
+		}
+		kept, err := os.ReadFile(filepath.Join(dir, "job.txt"))
+		if err != nil || string(kept) != string(body) {
+			t.Fatalf("file %q err %v", kept, err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "batch")); !os.IsNotExist(err) {
+			t.Fatalf("batch created: %v", err)
+		}
+		if len(caps) != 1 {
+			t.Fatalf("gemini calls %d", len(caps))
+		}
+		assertRefreshUntouched(t)
+		assertNoSecret(t, stdout, stderr, apiKey)
+	})
+
+	t.Run("batch is a file", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		body := []byte("not-a-dir")
+		writeAt(t, filepath.Join(dir, "batch"), body)
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || !strings.HasPrefix(stderr, "docs-cli: error: ") {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, "batch"))
+		if err != nil || string(got) != string(body) {
+			t.Fatalf("batch %q err %v", got, err)
+		}
+	})
+
+	t.Run("parsed is a file", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		body := []byte("A-JOB\n")
+		marker := []byte("parsed-file")
+		writeAt(t, filepath.Join(jobads, "a.txt"), body)
+		writeAt(t, filepath.Join(jobads, "parsed"), marker)
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || !strings.HasPrefix(stderr, "docs-cli: error: ") {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "a.txt")); err != nil || string(got) != string(body) {
+			t.Fatalf("a.txt %q err %v", got, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "parsed")); err != nil || string(got) != string(marker) {
+			t.Fatalf("parsed %q err %v", got, err)
+		}
+	})
+
+	t.Run("parsed not writable", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGeminiKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		jobads := filepath.Join(dir, "batch", "jobads")
+		parsed := filepath.Join(jobads, "parsed")
+		body := []byte("A-JOB\n")
+		writeAt(t, filepath.Join(jobads, "a.txt"), body)
+		if err := os.MkdirAll(parsed, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(parsed, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.Chmod(parsed, 0o700)
+		})
+		var caps []geminiCapture
+		stdout, stderr, code := runBatch(t, dir, []string{"parse", "--batch"}, deps{
+			GeminiClient: scriptedGemini(t, &caps, geminiStep{status: http.StatusOK, body: autoparseDocEnvelope(t, "Alpha", "Write today")}),
+		})
+		if code != 1 || stdout != "" || !strings.HasPrefix(stderr, "docs-cli: error: ") {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
+		}
+		if len(caps) != 1 {
+			t.Fatalf("gemini calls %d", len(caps))
+		}
+		if got, err := os.ReadFile(filepath.Join(jobads, "a.txt")); err != nil || string(got) != string(body) {
+			t.Fatalf("a.txt %q err %v", got, err)
+		}
+		entries, err := os.ReadDir(parsed)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("parsed %#v err %v", entries, err)
+		}
+	})
+
+	if len(fmCalls) != 0 {
+		t.Fatalf("fm calls %d", len(fmCalls))
+	}
 }
 
 func TestAnalyzeCommandFakeFM(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ commands:
   setup
   parse --html PATH [--autoparse]
   parse --txt PATH
+  parse --batch
   gemini-key
   analyze --json PATH
   draft --json PATH --template PATH --cv PATH [--pdf NAME]
@@ -49,6 +51,7 @@ parse:
   --html PATH      saved job HTML file
   --txt PATH       job details text file
   --autoparse      send the saved HTML to Gemini
+  --batch          parse every .txt file in ./batch/jobads
 
 gemini-key stores the Gemini API key in the keyring. The key is not a flag.
 
@@ -77,6 +80,7 @@ const (
 
 	errHTMLTooLarge      = "docs-cli: html exceeds 2 MiB"
 	errTxtTooLarge       = "docs-cli: txt exceeds 2 MiB"
+	errNoBatchTxt        = "docs-cli: no txt files: batch/jobads"
 	errJSONTooLarge      = "docs-cli: json exceeds 1 MiB"
 	errJobAdDetails      = "docs-cli: jobAdDetails not found"
 	errGeminiKeyMissing  = "docs-cli: gemini api key is not in the keyring"
@@ -747,6 +751,7 @@ func runParse(args []string, d deps) int {
 	htmlFlag := fs.String("html", "", "saved job HTML file")
 	txtFlag := fs.String("txt", "", "job details text file")
 	auto := fs.Bool("autoparse", false, "send the saved HTML to Gemini")
+	batch := fs.Bool("batch", false, "parse every .txt file in ./batch/jobads")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -754,7 +759,7 @@ func runParse(args []string, d deps) int {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
 	}
-	htmlSet, txtSet, autoSet := false, false, false
+	htmlSet, txtSet, autoSet, batchSet := false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "html":
@@ -763,8 +768,18 @@ func runParse(args []string, d deps) int {
 			txtSet = true
 		case "autoparse":
 			autoSet = true
+		case "batch":
+			batchSet = true
 		}
 	})
+	// --batch cannot be combined with --html, --txt, or --autoparse.
+	if batchSet && (htmlSet || txtSet || autoSet) {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	if batchSet && *batch {
+		return runParseBatch(d)
+	}
 	// --txt always uses autoparse. It cannot be combined with --html or --autoparse.
 	if txtSet && (htmlSet || autoSet || *txtFlag == "") {
 		fmt.Fprint(d.Stderr, usageText)
@@ -815,6 +830,193 @@ func runParse(args []string, d deps) int {
 		return 1
 	}
 	return 0
+}
+
+func runParseBatch(d deps) int {
+	wd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	jobads := filepath.Join(wd, "batch", "jobads")
+	parsed := filepath.Join(jobads, "parsed")
+	if err := ensureBatchDirs(wd); err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	entries, err := os.ReadDir(jobads)
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	var names []string
+	for _, ent := range entries {
+		if strings.EqualFold(filepath.Ext(ent.Name()), ".txt") {
+			names = append(names, ent.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		fmt.Fprintln(d.Stderr, errNoBatchTxt)
+		return 1
+	}
+
+	type batchFile struct {
+		name    string
+		src     string
+		rel     string
+		jsonDst string
+		txtDst  string
+		txtRel  string
+	}
+	files := make([]batchFile, 0, len(names))
+	for _, name := range names {
+		rel := filepath.Join("batch", "jobads", name)
+		src := filepath.Join(jobads, name)
+		info, err := os.Lstat(src)
+		if err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		if !info.Mode().IsRegular() {
+			fmt.Fprintf(d.Stderr, "docs-cli: not a regular file: %s\n", rel)
+			return 1
+		}
+		if info.Size() > maxHTMLBytes {
+			fmt.Fprintf(d.Stderr, "docs-cli: txt exceeds 2 MiB: %s\n", rel)
+			return 1
+		}
+		ext := filepath.Ext(name)
+		stem := strings.TrimSuffix(name, ext)
+		jsonName := stem + ".json"
+		jsonRel := filepath.Join("batch", "jobads", "parsed", jsonName)
+		txtRel := filepath.Join("batch", "jobads", "parsed", name)
+		jsonDst := filepath.Join(parsed, jsonName)
+		txtDst := filepath.Join(parsed, name)
+		if code := rejectParsedDest(d, jsonDst, jsonRel); code != 0 {
+			return code
+		}
+		if code := rejectParsedDest(d, txtDst, txtRel); code != 0 {
+			return code
+		}
+		files = append(files, batchFile{
+			name:    name,
+			src:     src,
+			rel:     rel,
+			jsonDst: jsonDst,
+			txtDst:  txtDst,
+			txtRel:  txtRel,
+		})
+	}
+
+	if code := prepareAutoparseKey(d); code != 0 {
+		return code
+	}
+	for _, file := range files {
+		page, err := readHTMLFile(file.src)
+		if errors.Is(err, errPageTooLarge) {
+			fmt.Fprintf(d.Stderr, "docs-cli: txt exceeds 2 MiB: %s\n", file.rel)
+			return 1
+		}
+		if err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		doc, err := jobad.Autoparse(context.Background(), page, d.GeminiClient)
+		if err != nil {
+			if errors.Is(err, keyring.ErrNotFound) {
+				fmt.Fprintln(d.Stderr, errGeminiKeyMissing)
+			} else {
+				fmt.Fprintln(d.Stderr, err.Error())
+			}
+			return 1
+		}
+		doc.Source = filepath.Join("batch", "jobads", file.name)
+		abs, err := filepath.Abs(file.jsonDst)
+		if err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		if err := writeExclusiveJSON(file.jsonDst, doc); err != nil {
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		if code := rejectParsedDest(d, file.txtDst, file.txtRel); code != 0 {
+			_ = os.Remove(file.jsonDst)
+			return code
+		}
+		if err := os.Rename(file.src, file.txtDst); err != nil {
+			_ = os.Remove(file.jsonDst)
+			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+			return 1
+		}
+		fmt.Fprintln(d.Stdout, abs)
+	}
+	return 0
+}
+
+// ensureBatchDirs creates batch, batch/jobads, and batch/jobads/parsed
+// at mode 0700 when they are missing. An existing directory keeps its mode.
+func ensureBatchDirs(wd string) error {
+	rels := []string{
+		"batch",
+		filepath.Join("batch", "jobads"),
+		filepath.Join("batch", "jobads", "parsed"),
+	}
+	var created []string
+	for _, rel := range rels {
+		path := filepath.Join(wd, rel)
+		info, err := os.Lstat(path)
+		if err == nil {
+			if !info.IsDir() {
+				break
+			}
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		created = append(created, path)
+	}
+	if err := os.MkdirAll(filepath.Join(wd, "batch", "jobads", "parsed"), 0o700); err != nil {
+		return err
+	}
+	for _, path := range created {
+		if err := os.Chmod(path, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectParsedDest(d deps, path, rel string) int {
+	_, err := os.Lstat(path)
+	if err == nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: parsed file already exists: %s\n", rel)
+		return 1
+	}
+	if !os.IsNotExist(err) {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	return 0
+}
+
+func writeExclusiveJSON(path string, v any) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	werr := writeIndentedJSON(f, v)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(path)
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	return nil
 }
 
 func runAutoparse(d deps, source string, page []byte) int {

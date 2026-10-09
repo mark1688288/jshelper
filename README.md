@@ -155,6 +155,7 @@ Production `./docs-cli create` and `./docs-cli auth` use the same state machine 
 ```bash
 docs-cli parse --html PATH [--autoparse]
 docs-cli parse --txt PATH
+docs-cli parse --batch
 ```
 
 `gemini-key` stores a Gemini API key in the keyring item `docs-cli` / `gemini-api-key`. The key is typed at the terminal and is not echoed. It is not a flag, not an environment variable, and it is not written to `.env` or `credentials.json`. `create`, `auth`, and `setup` do not read or write that item.
@@ -163,7 +164,7 @@ docs-cli parse --txt PATH
 docs-cli gemini-key
 ```
 
-On a terminal, `parse` asks for the key when that item is missing, then stores it. Without a key, `parse` keeps the local heading classification and does not call Gemini. When a key is stored, `parse` sends only the extracted plain text, with email addresses removed. It does not send the HTML page. `parse --autoparse` sends that saved HTML to Gemini and writes the same section JSON. Email addresses are removed before the page is sent. Without `--autoparse`, `parse` does not send the HTML page. `parse --txt PATH` reads a text file of the job details and sends that text to Gemini. Email addresses are removed before the text is sent. It does not need `--autoparse`. `go test` does not call Gemini.
+On a terminal, `parse` asks for the key when that item is missing, then stores it. Without a key, `parse` keeps the local heading classification and does not call Gemini. When a key is stored, `parse` sends only the extracted plain text, with email addresses removed. It does not send the HTML page. `parse --autoparse` sends that saved HTML to Gemini and writes the same section JSON. Email addresses are removed before the page is sent. Without `--autoparse`, `parse` does not send the HTML page. `parse --txt PATH` reads a text file of the job details and sends that text to Gemini. Email addresses are removed before the text is sent. It does not need `--autoparse`. `parse --batch` reads every .txt file in ./batch/jobads, one or more, and sends each file to Gemini. It writes the section JSON in ./batch/jobads/parsed and moves that .txt file there. It creates ./batch, ./batch/jobads, and ./batch/jobads/parsed when they are missing. `go test` does not call Gemini.
 
 `analyze` reads that section JSON and writes the requirement JSON to stdout. It uses the on-device model when that model is available. If the on-device model is unavailable and a Gemini API key is already stored, Gemini writes the same analysis JSON. It does not read `.env`. `go test` does not run `/usr/bin/fm` and does not call Gemini.
 
