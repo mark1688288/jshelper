@@ -1212,7 +1212,7 @@ func runAnalyze(args []string, d deps) int {
 		return 1
 	}
 	diagramPath := filepath.Join(filepath.Dir(*jsonFlag), stem+"-tech.svg")
-	distPath := filepath.Join(filepath.Dir(*jsonFlag), stem+"-tech-dist.svg")
+	distPath := filepath.Join(filepath.Dir(*jsonFlag), stem+"-tech-dist.md")
 	if code := rejectTechDiagram(d, diagramPath); code != 0 {
 		return code
 	}
@@ -1229,7 +1229,7 @@ func runAnalyze(args []string, d deps) int {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
 	}
-	dist, err := jobad.TechDistribution(analysis)
+	dist, err := jobad.TechDistribution(stem, analysis)
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
@@ -1363,7 +1363,7 @@ func runAnalyzeBatch(d deps) int {
 		jsonRel := filepath.Join(analyzedRel, name)
 		svgName := stem + "-tech.svg"
 		svgRel := filepath.Join(analyzedRel, svgName)
-		distName := stem + "-tech-dist.svg"
+		distName := stem + "-tech-dist.md"
 		distRel := filepath.Join(analyzedRel, distName)
 		analysisDst := filepath.Join(analyzed, analysisName)
 		jsonDst := filepath.Join(analyzed, name)
@@ -1420,7 +1420,8 @@ func runAnalyzeBatch(d deps) int {
 			fmt.Fprintln(d.Stderr, err.Error())
 			return 1
 		}
-		dist, err := jobad.TechDistribution(analysis)
+		stem := strings.TrimSuffix(file.name, filepath.Ext(file.name))
+		dist, err := jobad.TechDistribution(stem, analysis)
 		if err != nil {
 			fmt.Fprintln(d.Stderr, err.Error())
 			return 1

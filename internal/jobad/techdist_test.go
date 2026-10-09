@@ -3,246 +3,242 @@ package jobad
 import (
 	"bytes"
 	"errors"
-	"strconv"
 	"strings"
 	"testing"
 )
 
 func TestTechDistribution(t *testing.T) {
-	t.Run("places the 95169560 shape", func(t *testing.T) {
+	t.Run("places the 95148940 shape", func(t *testing.T) {
 		analysis := Analysis{
 			MustHave:   []string{"NOT-IN-CHART"},
 			Advantage:  []string{"ALSO-NOT"},
 			Languages:  []string{"English"},
 			SoftSkills: []string{"Communication"},
 			Tech: []Tech{
-				{Name: "Java or .NET", Level: levelMust, AppliesTo: techPtr("Backend")},
-				{Name: "RESTful services", Level: levelMust, AppliesTo: techPtr("APIs")},
-				{Name: "Angular, React, or similar modern frameworks", Level: levelMust, AppliesTo: techPtr("Frontend")},
-				{Name: "GraphQL", Level: levelAdvantage, AppliesTo: techPtr("APIs")},
-				{Name: "SQL (MSSQL, MySQL, or PostgreSQL)", Level: levelMust, AppliesTo: techPtr("Database")},
-				{Name: "WebSockets", Level: levelAdvantage, AppliesTo: techPtr("APIs")},
-				{Name: "Docker", Level: levelMust, AppliesTo: techPtr("Containerization")},
+				{Name: "Node.js", Level: levelMust, AppliesTo: techPtr("Full Stack")},
+				{Name: "React", Level: levelMust, AppliesTo: techPtr("Full Stack")},
+				{Name: "Typescript", Level: levelMust, AppliesTo: techPtr("Full Stack")},
+				{Name: "RESTful API", Level: levelMust, AppliesTo: techPtr("Backend")},
+				{Name: "RDBMS", Level: levelMust, AppliesTo: techPtr("Database")},
+				{Name: "NoSQL", Level: levelMust, AppliesTo: techPtr("Database")},
+				{Name: "Linux", Level: levelAdvantage, AppliesTo: techPtr("Infrastructure")},
+				{Name: "CI/CD", Level: levelAdvantage, AppliesTo: techPtr("DevOps")},
+				{Name: "Jenkins", Level: levelAdvantage, AppliesTo: techPtr("DevOps")},
+				{Name: "JMeter", Level: levelAdvantage, AppliesTo: techPtr("Testing")},
+				{Name: "AWS Kiro", Level: levelAdvantage, AppliesTo: techPtr("Cloud")},
 			},
 		}
-		got, err := TechDistribution(analysis)
+		got, err := TechDistribution("95148940", analysis)
 		if err != nil {
 			t.Fatal(err)
 		}
-		again, err := TechDistribution(analysis)
+		again, err := TechDistribution("95148940", analysis)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !bytes.Equal(got, again) {
 			t.Fatal("distribution bytes changed")
 		}
-		svg := string(got)
-		if !strings.HasPrefix(svg, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n") || !strings.HasSuffix(svg, "</svg>\n") {
-			t.Fatalf("svg envelope %q", svg[:80])
+		md := string(got)
+		if !strings.HasPrefix(md, "```mermaid\n"+distInit+"\nquadrantChart\n") || !strings.HasSuffix(md, "\n") {
+			t.Fatalf("envelope %q", md[:80])
 		}
-		if !strings.Contains(svg, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 `) || !strings.Contains(svg, "<title>tech distribution</title>") {
-			t.Fatalf("svg header %s", svg)
+		if strings.Contains(md, "# ") || strings.Contains(md, "<svg") || strings.Contains(md, "quadrantChart\nquadrantChart") {
+			t.Fatalf("shape %s", md)
 		}
-		if strings.Count(svg, `class="grid-cell"`) != 4 {
-			t.Fatalf("grid cells %d\n%s", strings.Count(svg, `class="grid-cell"`), svg)
-		}
-		for _, id := range []string{"grid-1-1", "grid-1-2", "grid-2-1", "grid-2-2"} {
-			if !strings.Contains(svg, `id="`+id+`"`) {
-				t.Fatalf("missing %s\n%s", id, svg)
+		for _, banned := range []string{"NOT-IN-CHART", "ALSO-NOT", "English", "Communication", "&amp;", "bar"} {
+			if strings.Contains(md, banned) {
+				t.Fatalf("markdown contains %q", banned)
 			}
 		}
-		if strings.Count(svg, `id="grid-`) != 4 {
-			t.Fatalf("extra grid ids\n%s", svg)
+		if !strings.Contains(md, "    title 95148940\n") {
+			t.Fatalf("title %s", md)
 		}
-		for _, banned := range []string{`id="cell-1-0"`, `id="cell-0-1"`, "<script", "foreignObject", "NOT-IN-CHART", "ALSO-NOT", "English", "Communication"} {
-			if strings.Contains(svg, banned) {
-				t.Fatalf("svg contains %q", banned)
-			}
-		}
-		if strings.Count(svg, `<line class="axis"`) != 2 {
-			t.Fatalf("axes %d\n%s", strings.Count(svg, `<line class="axis"`), svg)
-		}
-		for _, label := range []string{"must", "advantage"} {
-			if !strings.Contains(svg, `<text class="axis-label">`+label+`</text>`) {
-				t.Fatalf("missing axis label %s\n%s", label, svg)
-			}
-		}
-		for _, tick := range []string{"0", "1", "2"} {
-			if strings.Count(svg, `<text class="tick">`+tick+`</text>`) != 2 {
-				t.Fatalf("tick %s count %d\n%s", tick, strings.Count(svg, `<text class="tick">`+tick+`</text>`), svg)
-			}
-		}
-		apis := distGroup(t, svg, "cell-1-2")
 		for _, want := range []string{
-			`<text class="title">APIs</text>`,
-			`<text class="names">RESTful services / GraphQL / WebSockets</text>`,
-			`<ellipse class="circle"`,
+			`x-axis "must 0" --> "must 3"`,
+			`y-axis "advantage 0" --> "advantage 3"`,
+			`quadrant-1 "must 2–3 · advantage 2–3"`,
+			`quadrant-2 "must 0–1 · advantage 2–3"`,
+			`quadrant-3 "must 0–1 · advantage 0–1"`,
+			`quadrant-4 "must 2–3 · advantage 0–1"`,
 		} {
-			if !strings.Contains(apis, want) {
-				t.Fatalf("cell-1-2 missing %s\n%s", want, apis)
+			if !strings.Contains(md, want) {
+				t.Fatalf("missing %s\n%s", want, md)
 			}
 		}
-		if strings.Count(apis, "<ellipse") != 1 {
-			t.Fatalf("cell-1-2 ellipses %d\n%s", strings.Count(apis, "<ellipse"), apis)
-		}
-		low := distGroup(t, svg, "cell-1-1")
-		titles := []string{">Backend</text>", ">Frontend</text>", ">Database</text>", ">Containerization</text>"}
-		names := []string{
-			">Java or .NET</text>",
-			">Angular, React, or similar modern frameworks</text>",
-			">SQL (MSSQL, MySQL, or PostgreSQL)</text>",
-			">Docker</text>",
+		points := []string{
+			`"Full Stack": [0.875, 0.125] color: #3A3A3A, stroke-color: #3A3A3A, stroke-width: 1px`,
+			`"Backend": [0.375, 0.125] color: #3A3A3A, stroke-color: #3A3A3A, stroke-width: 1px`,
+			`"Database": [0.625, 0.125] color: #3A3A3A, stroke-color: #3A3A3A, stroke-width: 1px`,
+			`"Infrastructure": [0.125, 0.450] color: #F2F2F2, stroke-color: #3A3A3A, stroke-width: 2px`,
+			`"DevOps": [0.125, 0.625] color: #F2F2F2, stroke-color: #3A3A3A, stroke-width: 2px`,
+			`"Testing": [0.125, 0.375] color: #F2F2F2, stroke-color: #3A3A3A, stroke-width: 2px`,
+			`"Cloud": [0.125, 0.300] color: #F2F2F2, stroke-color: #3A3A3A, stroke-width: 2px`,
 		}
 		prev := -1
-		for _, want := range append(titles, names...) {
-			at := strings.Index(low, want)
-			if at < 0 {
-				t.Fatalf("cell-1-1 missing %s\n%s", want, low)
+		for _, want := range points {
+			at := strings.Index(md, want)
+			if at < 0 || at < prev {
+				t.Fatalf("point order %s\n%s", want, md)
 			}
-			if strings.HasPrefix(want, ">Backend") || strings.HasPrefix(want, ">Frontend") || strings.HasPrefix(want, ">Database") || strings.HasPrefix(want, ">Containerization") {
-				if at < prev {
-					t.Fatalf("title order %s\n%s", want, low)
-				}
-				prev = at
-			}
+			prev = at
 		}
-		if strings.Count(low, "<ellipse") != 4 {
-			t.Fatalf("cell-1-1 ellipses %d\n%s", strings.Count(low, "<ellipse"), low)
+		if !strings.Contains(md, "```\n\n| applies_to | must | advantage | 技術 |\n| --- | --- | --- | --- |\n| Full Stack | 3 | 0 | Node.js / React / Typescript |") {
+			t.Fatalf("table %s", md)
 		}
-		cys := ellipseCYs(t, low)
-		if len(cys) != 4 {
-			t.Fatalf("cys %v", cys)
+	})
+
+	t.Run("fills a point that has both levels", func(t *testing.T) {
+		got, err := TechDistribution("core", Analysis{Tech: []Tech{
+			{Name: "Go", Level: levelMust, AppliesTo: techPtr("Core")},
+			{Name: "Rust", Level: levelAdvantage, AppliesTo: techPtr("Core")},
+		}})
+		if err != nil {
+			t.Fatal(err)
 		}
-		for i := 1; i < len(cys); i++ {
-			if cys[i] <= cys[i-1] {
-				t.Fatalf("circles overlap or are not top-first %v", cys)
+		md := string(got)
+		for _, want := range []string{
+			`"Core": [0.750, 0.750] color: #737373, stroke-color: #3A3A3A, stroke-width: 1px`,
+			`quadrant-1 "must 1 · advantage 1"`,
+			`quadrant-2 "must 0 · advantage 1"`,
+			`quadrant-3 "must 0 · advantage 0"`,
+			`quadrant-4 "must 1 · advantage 0"`,
+			`x-axis "must 0" --> "must 1"`,
+			"| Core | 1 | 1 | Go / Rust |",
+		} {
+			if !strings.Contains(md, want) {
+				t.Fatalf("missing %s\n%s", want, md)
 			}
 		}
 	})
 
-	t.Run("keeps null applies_to as two circles", func(t *testing.T) {
-		got, err := TechDistribution(Analysis{Tech: []Tech{
+	t.Run("splits five points into two columns", func(t *testing.T) {
+		names := []string{"One", "Two", "Three", "Four", "Five"}
+		tech := make([]Tech, len(names))
+		for i, name := range names {
+			tech[i] = Tech{Name: name, Level: levelAdvantage, AppliesTo: techPtr(name)}
+		}
+		got, err := TechDistribution("five", Analysis{Tech: tech})
+		if err != nil {
+			t.Fatal(err)
+		}
+		md := string(got)
+		first := `"One": [0.138, 0.919] color: #F2F2F2, stroke-color: #3A3A3A, stroke-width: 2px`
+		fifth := `"Five": [0.363, 0.919] color: #F2F2F2, stroke-color: #3A3A3A, stroke-width: 2px`
+		if strings.Index(md, first) < 0 || strings.Index(md, first) > strings.Index(md, fifth) {
+			t.Fatalf("columns %s", md)
+		}
+		if strings.Count(md, "color: #F2F2F2") != 5 {
+			t.Fatalf("styles %s", md)
+		}
+	})
+
+	t.Run("empty tech is none", func(t *testing.T) {
+		got, err := TechDistribution("empty", Analysis{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "(none)\n" || bytes.Contains(got, []byte("quadrantChart")) {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("all blank names are none", func(t *testing.T) {
+		got, err := TechDistribution("blank", Analysis{Tech: []Tech{{Name: " \t ", Level: levelMust}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "(none)\n" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("keeps ampersand", func(t *testing.T) {
+		got, err := TechDistribution("amp", Analysis{Tech: []Tech{
+			{Name: "A & B", Level: levelMust, AppliesTo: techPtr("X<Y")},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		md := string(got)
+		if !strings.Contains(md, `"X<Y": [`) || !strings.Contains(md, "| X<Y | 1 | 0 | A & B |") || strings.Contains(md, "&amp;") || strings.Contains(md, "&lt;") {
+			t.Fatalf("markdown %s", md)
+		}
+	})
+
+	t.Run("replaces quotes in the label", func(t *testing.T) {
+		got, err := TechDistribution(`Job "A"`, Analysis{Tech: []Tech{
+			{Name: `Say "Hi"`, Level: levelMust, AppliesTo: nil},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		md := string(got)
+		if !strings.Contains(md, "    title Job A\n") || !strings.Contains(md, `"Say 'Hi'": [`) || !strings.Contains(md, `| Say 'Hi' | 1 | 0 | Say "Hi" |`) {
+			t.Fatalf("markdown %s", md)
+		}
+		if strings.Contains(md, `Job "A"`) {
+			t.Fatalf("title quotes left %s", md)
+		}
+	})
+
+	t.Run("keeps null applies_to apart", func(t *testing.T) {
+		got, err := TechDistribution("solo", Analysis{Tech: []Tech{
 			{Name: "Go", Level: levelMust, AppliesTo: nil},
 			{Name: "Rust", Level: levelAdvantage, AppliesTo: nil},
 		}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		cell := distGroup(t, svg, "cell-1-1")
-		if strings.Count(cell, `<g class="circle">`) != 2 {
-			t.Fatalf("circles %d\n%s", strings.Count(cell, `<g class="circle">`), cell)
-		}
-		if !strings.Contains(cell, `<text class="title">Go</text>`) || !strings.Contains(cell, `<text class="title">Rust</text>`) {
-			t.Fatalf("titles %s", cell)
-		}
-		if !strings.Contains(cell, `<text class="names">Go</text>`) || !strings.Contains(cell, `<text class="names">Rust</text>`) {
-			t.Fatalf("names %s", cell)
-		}
-		if strings.Contains(svg, " / ") || strings.Contains(svg, `id="cell-1-2"`) || strings.Contains(svg, `id="cell-1-0"`) {
-			t.Fatalf("svg %s", svg)
+		md := string(got)
+		if strings.Contains(md, "Go / Rust") || !strings.Contains(md, `"Go": [0.750, 0.250]`) || !strings.Contains(md, `"Rust": [0.250, 0.750]`) {
+			t.Fatalf("markdown %s", md)
 		}
 	})
 
-	t.Run("blank applies_to is its own circle", func(t *testing.T) {
-		got, err := TechDistribution(Analysis{Tech: []Tech{
+	t.Run("blank applies_to is its own point", func(t *testing.T) {
+		got, err := TechDistribution("blank-to", Analysis{Tech: []Tech{
 			{Name: "Go", Level: levelMust, AppliesTo: techPtr("  ")},
 		}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		cell := distGroup(t, string(got), "cell-1-1")
-		if !strings.Contains(cell, `<text class="title">Go</text>`) || strings.Contains(cell, " / ") {
-			t.Fatalf("cell %s", cell)
-		}
-	})
-
-	t.Run("empty tech is none", func(t *testing.T) {
-		got, err := TechDistribution(Analysis{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		svg := string(got)
-		if !strings.Contains(svg, `<text class="empty">(none)</text>`) || strings.Contains(svg, `class="circle"`) {
-			t.Fatalf("svg %s", svg)
-		}
-		if strings.Count(svg, `class="grid-cell"`) != 4 {
-			t.Fatalf("grid %d\n%s", strings.Count(svg, `class="grid-cell"`), svg)
-		}
-		for _, tick := range []string{"0", "1", "2"} {
-			if strings.Count(svg, `<text class="tick">`+tick+`</text>`) != 2 {
-				t.Fatalf("tick %s\n%s", tick, svg)
-			}
-		}
-		for _, label := range []string{"must", "advantage"} {
-			if !strings.Contains(svg, `<text class="axis-label">`+label+`</text>`) {
-				t.Fatalf("label %s\n%s", label, svg)
-			}
-		}
-	})
-
-	t.Run("all blank names are none", func(t *testing.T) {
-		got, err := TechDistribution(Analysis{Tech: []Tech{{Name: " \t ", Level: levelMust}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		svg := string(got)
-		if !strings.Contains(svg, `<text class="empty">(none)</text>`) || strings.Contains(svg, `class="circle"`) {
-			t.Fatalf("svg %s", svg)
-		}
-	})
-
-	t.Run("escapes names", func(t *testing.T) {
-		got, err := TechDistribution(Analysis{Tech: []Tech{
-			{Name: "A & B", Level: levelMust, AppliesTo: techPtr("X<Y")},
-		}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		svg := string(got)
-		if !strings.Contains(svg, "A &amp; B") || !strings.Contains(svg, "X&lt;Y") || strings.Contains(svg, "A & B") || strings.Contains(svg, "X<Y") {
-			t.Fatalf("svg %s", svg)
+		md := string(got)
+		if !strings.Contains(md, `"Go": [`) || strings.Contains(md, " / ") {
+			t.Fatalf("markdown %s", md)
 		}
 	})
 
 	t.Run("keeps case apart", func(t *testing.T) {
-		got, err := TechDistribution(Analysis{Tech: []Tech{
+		got, err := TechDistribution("case", Analysis{Tech: []Tech{
 			{Name: "Java", Level: levelMust, AppliesTo: techPtr("Backend")},
 			{Name: "Go", Level: levelMust, AppliesTo: techPtr("backend")},
 		}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		cell := distGroup(t, string(got), "cell-1-1")
-		if strings.Count(cell, `<g class="circle">`) != 2 || !strings.Contains(cell, `<text class="title">Backend</text>`) || !strings.Contains(cell, `<text class="title">backend</text>`) {
-			t.Fatalf("cell %s", cell)
+		md := string(got)
+		if !strings.Contains(md, `"Backend": [`) || !strings.Contains(md, `"backend": [`) {
+			t.Fatalf("markdown %s", md)
 		}
 	})
 
-	t.Run("extends the axes past 2", func(t *testing.T) {
-		got, err := TechDistribution(Analysis{Tech: []Tech{
+	t.Run("bumps an odd band", func(t *testing.T) {
+		got, err := TechDistribution("odd", Analysis{Tech: []Tech{
 			{Name: "A", Level: levelMust, AppliesTo: techPtr("Lang")},
 			{Name: "B", Level: levelMust, AppliesTo: techPtr("Lang")},
-			{Name: "C", Level: levelMust, AppliesTo: techPtr("Lang")},
 		}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		if strings.Count(svg, `class="grid-cell"`) != 9 {
-			t.Fatalf("grid %d\n%s", strings.Count(svg, `class="grid-cell"`), svg)
-		}
-		if strings.Count(svg, `<text class="tick">3</text>`) != 2 || strings.Contains(svg, `id="cell-3-0"`) {
-			t.Fatalf("svg %s", svg)
-		}
-		cell := distGroup(t, svg, "cell-3-1")
-		if !strings.Contains(cell, `<text class="title">Lang</text>`) || !strings.Contains(cell, `<text class="names">A / B / C</text>`) {
-			t.Fatalf("cell %s", cell)
+		md := string(got)
+		if !strings.Contains(md, `x-axis "must 0" --> "must 3"`) || !strings.Contains(md, `"Lang": [0.625, 0.125]`) || !strings.Contains(md, `quadrant-1 "must 2–3 · advantage 2–3"`) {
+			t.Fatalf("markdown %s", md)
 		}
 	})
 
 	t.Run("skips a blank name", func(t *testing.T) {
-		got, err := TechDistribution(Analysis{Tech: []Tech{
+		got, err := TechDistribution("skip", Analysis{Tech: []Tech{
 			{Name: "  ", Level: levelMust, AppliesTo: techPtr("Backend")},
 			{Name: "\n", Level: "expert", AppliesTo: techPtr("Backend")},
 			{Name: "Go", Level: levelMust, AppliesTo: nil},
@@ -250,87 +246,29 @@ func TestTechDistribution(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		if strings.Contains(svg, "Backend") || strings.Contains(svg, "expert") || !strings.Contains(svg, `<text class="title">Go</text>`) {
-			t.Fatalf("svg %s", svg)
+		md := string(got)
+		if strings.Contains(md, "Backend") || strings.Contains(md, "expert") || !strings.Contains(md, `"Go": [`) {
+			t.Fatalf("markdown %s", md)
 		}
 	})
 
 	t.Run("keeps chinese", func(t *testing.T) {
-		got, err := TechDistribution(Analysis{Tech: []Tech{
+		got, err := TechDistribution("zh", Analysis{Tech: []Tech{
 			{Name: "前端", Level: levelAdvantage, AppliesTo: techPtr("介面")},
 		}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		svg := string(got)
-		if !strings.Contains(svg, `<text class="title">介面</text>`) || !strings.Contains(svg, `<text class="names">前端</text>`) {
-			t.Fatalf("svg %s", svg)
+		md := string(got)
+		if !strings.Contains(md, `"介面": [0.250, 0.750]`) || !strings.Contains(md, "| 介面 | 0 | 1 | 前端 |") {
+			t.Fatalf("markdown %s", md)
 		}
 	})
 
 	t.Run("rejects a bad level", func(t *testing.T) {
-		got, err := TechDistribution(Analysis{Tech: []Tech{{Name: "Go", Level: "expert", AppliesTo: techPtr("Backend")}}})
+		got, err := TechDistribution("bad", Analysis{Tech: []Tech{{Name: "Go", Level: "expert", AppliesTo: techPtr("Backend")}}})
 		if !errors.Is(err, ErrTechDistributionInvalid) || got != nil || err.Error() != "docs-cli: tech distribution is invalid" {
 			t.Fatalf("got %q err %v", got, err)
 		}
 	})
-}
-
-func distGroup(t *testing.T, svg, id string) string {
-	t.Helper()
-	needle := `id="` + id + `"`
-	at := strings.Index(svg, needle)
-	if at < 0 {
-		t.Fatalf("missing %s\n%s", id, svg)
-	}
-	start := strings.LastIndex(svg[:at], "<g ")
-	if start < 0 {
-		t.Fatalf("no group for %s", id)
-	}
-	depth := 0
-	i := start
-	for i < len(svg) {
-		nextOpen := strings.Index(svg[i:], "<g")
-		nextClose := strings.Index(svg[i:], "</g>")
-		if nextClose < 0 {
-			t.Fatalf("unclosed %s", id)
-		}
-		if nextOpen >= 0 && nextOpen < nextClose {
-			depth++
-			i += nextOpen + 2
-			continue
-		}
-		depth--
-		i += nextClose + len("</g>")
-		if depth == 0 {
-			return svg[start:i]
-		}
-	}
-	t.Fatalf("unclosed %s", id)
-	return ""
-}
-
-func ellipseCYs(t *testing.T, group string) []int {
-	t.Helper()
-	var ys []int
-	rest := group
-	for {
-		i := strings.Index(rest, `cy="`)
-		if i < 0 {
-			break
-		}
-		rest = rest[i+len(`cy="`):]
-		j := strings.Index(rest, `"`)
-		if j < 0 {
-			t.Fatalf("unclosed cy %s", group)
-		}
-		n, err := strconv.Atoi(rest[:j])
-		if err != nil {
-			t.Fatal(err)
-		}
-		ys = append(ys, n)
-		rest = rest[j:]
-	}
-	return ys
 }

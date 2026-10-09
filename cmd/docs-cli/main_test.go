@@ -4204,7 +4204,7 @@ func TestAnalyzeBatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		roleDist, err := filepath.Abs(filepath.Join(analyzed, "Role-tech-dist.svg"))
+		roleDist, err := filepath.Abs(filepath.Join(analyzed, "Role-tech-dist.md"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -4216,7 +4216,7 @@ func TestAnalyzeBatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		aDist, err := filepath.Abs(filepath.Join(analyzed, "a-tech-dist.svg"))
+		aDist, err := filepath.Abs(filepath.Join(analyzed, "a-tech-dist.md"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -4234,13 +4234,11 @@ func TestAnalyzeBatch(t *testing.T) {
 		assertPerm(t, filepath.Join(analyzed, "a-analysis.json"), 0o600)
 		assertPerm(t, filepath.Join(analyzed, "Role-tech.svg"), 0o600)
 		assertPerm(t, filepath.Join(analyzed, "a-tech.svg"), 0o600)
-		assertPerm(t, filepath.Join(analyzed, "Role-tech-dist.svg"), 0o600)
-		assertPerm(t, filepath.Join(analyzed, "a-tech-dist.svg"), 0o600)
+		assertPerm(t, filepath.Join(analyzed, "Role-tech-dist.md"), 0o600)
+		assertPerm(t, filepath.Join(analyzed, "a-tech-dist.md"), 0o600)
 		for _, path := range []string{
 			filepath.Join(analyzed, "Role-tech.svg"),
 			filepath.Join(analyzed, "a-tech.svg"),
-			filepath.Join(analyzed, "Role-tech-dist.svg"),
-			filepath.Join(analyzed, "a-tech-dist.svg"),
 		} {
 			got, err := os.ReadFile(path)
 			if err != nil {
@@ -4250,6 +4248,17 @@ func TestAnalyzeBatch(t *testing.T) {
 				t.Fatalf("%s %s", path, got)
 			}
 		}
+		for _, path := range []string{
+			filepath.Join(analyzed, "Role-tech-dist.md"),
+			filepath.Join(analyzed, "a-tech-dist.md"),
+		} {
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != "(none)\n" || bytes.Contains(got, []byte("quadrantChart")) || bytes.Contains(got, []byte(apiKey)) {
+				t.Fatalf("%s %q err %v", path, got, err)
+			}
+		}
+		assertAbsent(t, filepath.Join(analyzed, "Role-tech-dist.svg"))
+		assertAbsent(t, filepath.Join(analyzed, "a-tech-dist.svg"))
 		assertAbsent(t, filepath.Join(parsed, "Role.JSON"))
 		assertAbsent(t, filepath.Join(parsed, "a.json"))
 		assertFileBytes(t, filepath.Join(parsed, "keep.txt"), keep)
@@ -4744,7 +4753,7 @@ func TestAnalyzeBatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		aDist, err := filepath.Abs(filepath.Join(analyzed, "a-tech-dist.svg"))
+		aDist, err := filepath.Abs(filepath.Join(analyzed, "a-tech-dist.md"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -4758,16 +4767,16 @@ func TestAnalyzeBatch(t *testing.T) {
 			t.Fatalf("svg %q err %v", svgBody, err)
 		}
 		assertPerm(t, filepath.Join(analyzed, "a-tech.svg"), 0o600)
-		distBody, err := os.ReadFile(filepath.Join(analyzed, "a-tech-dist.svg"))
-		if err != nil || !bytes.Contains(distBody, []byte(`<text class="empty">(none)</text>`)) || bytes.Contains(distBody, []byte(`class="circle"`)) {
+		distBody, err := os.ReadFile(filepath.Join(analyzed, "a-tech-dist.md"))
+		if err != nil || string(distBody) != "(none)\n" || bytes.Contains(distBody, []byte("quadrantChart")) {
 			t.Fatalf("dist %q err %v", distBody, err)
 		}
-		assertPerm(t, filepath.Join(analyzed, "a-tech-dist.svg"), 0o600)
+		assertPerm(t, filepath.Join(analyzed, "a-tech-dist.md"), 0o600)
 		assertFileBytes(t, filepath.Join(parsed, "b.json"), bBody)
 		assertAbsent(t, filepath.Join(parsed, "a.json"))
 		assertAbsent(t, filepath.Join(analyzed, "b-analysis.json"))
 		assertAbsent(t, filepath.Join(analyzed, "b-tech.svg"))
-		assertAbsent(t, filepath.Join(analyzed, "b-tech-dist.svg"))
+		assertAbsent(t, filepath.Join(analyzed, "b-tech-dist.md"))
 		assertAbsent(t, filepath.Join(analyzed, "b.json"))
 		if len(calls) != 3 {
 			t.Fatalf("calls %#v", calls)
@@ -4898,7 +4907,7 @@ func TestAnalyzeTechDiagram(t *testing.T) {
 		}
 		assertFileBytes(t, svgPath, marker)
 		assertFileBytes(t, path, body)
-		assertAbsent(t, filepath.Join(dir, "jd-tech-dist.svg"))
+		assertAbsent(t, filepath.Join(dir, "jd-tech-dist.md"))
 		if len(calls) != 0 {
 			t.Fatalf("calls %#v", calls)
 		}
@@ -4977,7 +4986,7 @@ func TestAnalyzeTechDiagram(t *testing.T) {
 			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 		}
 		assertAbsent(t, filepath.Join(dir, "jd-tech.svg"))
-		assertAbsent(t, filepath.Join(dir, "jd-tech-dist.svg"))
+		assertAbsent(t, filepath.Join(dir, "jd-tech-dist.md"))
 		assertFileBytes(t, path, body)
 		if len(calls) != 1 {
 			t.Fatalf("calls %#v", calls)
@@ -5000,7 +5009,7 @@ func TestAnalyzeTechDiagram(t *testing.T) {
 		}
 		assertFileBytes(t, path, body)
 		assertAbsent(t, filepath.Join(dir, "-tech.svg"))
-		assertAbsent(t, filepath.Join(dir, "-tech-dist.svg"))
+		assertAbsent(t, filepath.Join(dir, "-tech-dist.md"))
 		if len(calls) != 0 {
 			t.Fatalf("calls %#v", calls)
 		}
@@ -5011,7 +5020,7 @@ func TestAnalyzeTechDistribution(t *testing.T) {
 	model := `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"RESTful services","level":"must","applies_to":"APIs"},{"name":"GraphQL","level":"advantage","applies_to":"APIs"},{"name":"WebSockets","level":"advantage","applies_to":"APIs"}],"soft_skills":[]}`
 	doc := batchJob("Know Go")
 
-	t.Run("writes both svgs beside json", func(t *testing.T) {
+	t.Run("writes the diagram and the markdown", func(t *testing.T) {
 		keyring.MockInit()
 		dir := t.TempDir()
 		body := jobFileBytes(t, doc)
@@ -5027,21 +5036,53 @@ func TestAnalyzeTechDistribution(t *testing.T) {
 		if strings.Contains(stdout, "jd-tech") {
 			t.Fatalf("stdout printed a diagram path %q", stdout)
 		}
-		for _, name := range []string{"jd-tech.svg", "jd-tech-dist.svg"} {
-			svgPath := filepath.Join(dir, name)
-			assertPerm(t, svgPath, 0o600)
+		for _, name := range []string{"jd-tech.svg", "jd-tech-dist.md"} {
+			assertPerm(t, filepath.Join(dir, name), 0o600)
 		}
-		dist, err := os.ReadFile(filepath.Join(dir, "jd-tech-dist.svg"))
+		dist, err := os.ReadFile(filepath.Join(dir, "jd-tech-dist.md"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{`<text class="title">APIs</text>`, `<text class="names">RESTful services / GraphQL / WebSockets</text>`, `id="cell-1-2"`} {
+		for _, want := range []string{
+			"quadrantChart",
+			"    title jd\n",
+			`"APIs": [0.375, 0.625] color: #737373, stroke-color: #3A3A3A, stroke-width: 1px`,
+			"| APIs | 1 | 2 | RESTful services / GraphQL / WebSockets |",
+		} {
 			if !bytes.Contains(dist, []byte(want)) {
 				t.Fatalf("missing %s\n%s", want, dist)
 			}
 		}
+		assertAbsent(t, filepath.Join(dir, "jd-tech-dist.svg"))
 		assertFileBytes(t, path, body)
 		assertAbsent(t, filepath.Join(dir, "batch"))
+		if len(calls) != 2 {
+			t.Fatalf("calls %#v", calls)
+		}
+	})
+
+	t.Run("old svg distribution does not block markdown", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		body := jobFileBytes(t, doc)
+		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
+		old := filepath.Join(dir, "jd-tech-dist.svg")
+		marker := []byte("<svg>old</svg>")
+		writeAt(t, old, marker)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: model + "\n"})
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path}, deps{
+			GeminiClient: blockGemini(t),
+		})
+		if code != 0 || stderr != "" || stdout != string(analysisFileBytes(t, model)) {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		assertFileBytes(t, old, marker)
+		assertPerm(t, filepath.Join(dir, "jd-tech-dist.md"), 0o600)
+		dist, err := os.ReadFile(filepath.Join(dir, "jd-tech-dist.md"))
+		if err != nil || !bytes.Contains(dist, []byte("quadrantChart")) {
+			t.Fatalf("dist %q err %v", dist, err)
+		}
 		if len(calls) != 2 {
 			t.Fatalf("calls %#v", calls)
 		}
@@ -5052,7 +5093,7 @@ func TestAnalyzeTechDistribution(t *testing.T) {
 		dir := t.TempDir()
 		body := jobFileBytes(t, doc)
 		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
-		distPath := filepath.Join(dir, "jd-tech-dist.svg")
+		distPath := filepath.Join(dir, "jd-tech-dist.md")
 		marker := []byte("already-dist")
 		writeAt(t, distPath, marker)
 		var calls [][]string
@@ -5079,7 +5120,7 @@ func TestAnalyzeTechDistribution(t *testing.T) {
 		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
 		marker := []byte("symlink-dist")
 		target := writeAt(t, filepath.Join(dir, "marker.svg"), marker)
-		distPath := filepath.Join(dir, "jd-tech-dist.svg")
+		distPath := filepath.Join(dir, "jd-tech-dist.md")
 		if err := os.Symlink(target, distPath); err != nil {
 			t.Fatal(err)
 		}
@@ -5108,7 +5149,7 @@ func TestAnalyzeTechDistribution(t *testing.T) {
 		dir := t.TempDir()
 		body := jobFileBytes(t, doc)
 		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
-		distPath := filepath.Join(dir, "jd-tech-dist.svg")
+		distPath := filepath.Join(dir, "jd-tech-dist.md")
 		if err := os.Mkdir(distPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -5147,7 +5188,7 @@ func TestAnalyzeTechDistribution(t *testing.T) {
 			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 		}
 		assertAbsent(t, filepath.Join(dir, "jd-tech.svg"))
-		assertAbsent(t, filepath.Join(dir, "jd-tech-dist.svg"))
+		assertAbsent(t, filepath.Join(dir, "jd-tech-dist.md"))
 		assertFileBytes(t, path, body)
 		if len(calls) != 2 {
 			t.Fatalf("calls %#v", calls)
@@ -5174,7 +5215,7 @@ func TestAnalyzeTechDistribution(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		distAbs, err := filepath.Abs(filepath.Join(analyzed, "95169560-tech-dist.svg"))
+		distAbs, err := filepath.Abs(filepath.Join(analyzed, "95169560-tech-dist.md"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -5184,11 +5225,12 @@ func TestAnalyzeTechDistribution(t *testing.T) {
 		if strings.Contains(stdout, "must_have") {
 			t.Fatalf("stdout printed json %q", stdout)
 		}
-		assertPerm(t, filepath.Join(analyzed, "95169560-tech-dist.svg"), 0o600)
-		dist, err := os.ReadFile(filepath.Join(analyzed, "95169560-tech-dist.svg"))
-		if err != nil || !bytes.Contains(dist, []byte(`id="cell-1-2"`)) {
+		assertPerm(t, filepath.Join(analyzed, "95169560-tech-dist.md"), 0o600)
+		dist, err := os.ReadFile(filepath.Join(analyzed, "95169560-tech-dist.md"))
+		if err != nil || !bytes.Contains(dist, []byte("    title 95169560\n")) || !bytes.Contains(dist, []byte("quadrantChart")) {
 			t.Fatalf("dist %q err %v", dist, err)
 		}
+		assertAbsent(t, filepath.Join(analyzed, "95169560-tech-dist.svg"))
 		assertFileBytes(t, filepath.Join(analyzed, "95169560.json"), body)
 		assertAbsent(t, filepath.Join(parsed, "95169560.json"))
 	})
@@ -5204,17 +5246,17 @@ func TestAnalyzeTechDistribution(t *testing.T) {
 		body := jobFileBytes(t, doc)
 		writeAt(t, filepath.Join(parsed, "a.json"), body)
 		marker := []byte("already-dist")
-		writeAt(t, filepath.Join(analyzed, "a-tech-dist.svg"), marker)
+		writeAt(t, filepath.Join(analyzed, "a-tech-dist.md"), marker)
 		var calls [][]string
 		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: model + "\n"})
 		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch"}, deps{
 			GeminiClient: blockGemini(t),
 		})
-		want := "docs-cli: analyzed file already exists: " + filepath.Join("batch", "jobads", "analyzed", "a-tech-dist.svg") + "\n"
+		want := "docs-cli: analyzed file already exists: " + filepath.Join("batch", "jobads", "analyzed", "a-tech-dist.md") + "\n"
 		if code != 1 || stdout != "" || stderr != want {
 			t.Fatalf("exit %d stdout %q stderr %q", code, stdout, stderr)
 		}
-		assertFileBytes(t, filepath.Join(analyzed, "a-tech-dist.svg"), marker)
+		assertFileBytes(t, filepath.Join(analyzed, "a-tech-dist.md"), marker)
 		assertFileBytes(t, filepath.Join(parsed, "a.json"), body)
 		assertAbsent(t, filepath.Join(analyzed, "a-analysis.json"))
 		assertAbsent(t, filepath.Join(analyzed, "a-tech.svg"))
@@ -5243,7 +5285,7 @@ func TestAnalyzeTechDistribution(t *testing.T) {
 		assertFileBytes(t, filepath.Join(parsed, "a.json"), body)
 		assertAbsent(t, filepath.Join(analyzed, "a-analysis.json"))
 		assertAbsent(t, filepath.Join(analyzed, "a-tech.svg"))
-		assertAbsent(t, filepath.Join(analyzed, "a-tech-dist.svg"))
+		assertAbsent(t, filepath.Join(analyzed, "a-tech-dist.md"))
 		assertAbsent(t, filepath.Join(analyzed, "a.json"))
 		if len(calls) != 2 {
 			t.Fatalf("calls %#v", calls)
