@@ -136,7 +136,7 @@ func renderDistMarkdown(stem string, points []distPoint) []byte {
 		buf.WriteByte('\n')
 	}
 	buf.WriteString("```\n\n")
-	buf.WriteString("| applies_to | must | advantage | 技術 |\n")
+	buf.WriteString("| applies_to | must | advantage | technical |\n")
 	buf.WriteString("| --- | --- | --- | --- |\n")
 	for _, point := range points {
 		buf.WriteString("| ")

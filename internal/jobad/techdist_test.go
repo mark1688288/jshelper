@@ -83,7 +83,7 @@ func TestTechDistribution(t *testing.T) {
 			}
 			prev = at
 		}
-		if !strings.Contains(md, "```\n\n| applies_to | must | advantage | 技術 |\n| --- | --- | --- | --- |\n| Full Stack | 3 | 0 | Node.js / React / Typescript |") {
+		if !strings.Contains(md, "```\n\n| applies_to | must | advantage | technical |\n| --- | --- | --- | --- |\n| Full Stack | 3 | 0 | Node.js / React / Typescript |") {
 			t.Fatalf("table %s", md)
 		}
 	})
