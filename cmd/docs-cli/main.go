@@ -1211,7 +1211,7 @@ func runAnalyze(args []string, d deps) int {
 		fmt.Fprintf(d.Stderr, "docs-cli: not a json file: %s\n", *jsonFlag)
 		return 1
 	}
-	diagramPath := filepath.Join(filepath.Dir(*jsonFlag), stem+"-tech.svg")
+	diagramPath := filepath.Join(filepath.Dir(*jsonFlag), stem+"-tech.md")
 	distPath := filepath.Join(filepath.Dir(*jsonFlag), stem+"-tech-dist.md")
 	if code := rejectTechDiagram(d, diagramPath); code != 0 {
 		return code
@@ -1224,7 +1224,7 @@ func runAnalyze(args []string, d deps) int {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
 	}
-	svg, err := jobad.TechDiagram(analysis)
+	diagram, err := jobad.TechDiagram(analysis)
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
@@ -1234,7 +1234,7 @@ func runAnalyze(args []string, d deps) int {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
 	}
-	if err := writeExclusiveFile(diagramPath, svg); err != nil {
+	if err := writeTechDiagram(diagramPath, diagram); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			fmt.Fprintf(d.Stderr, "docs-cli: tech diagram already exists: %s\n", diagramPath)
 			return 1
@@ -1330,8 +1330,8 @@ func runAnalyzeBatch(d deps) int {
 		analysisDst string
 		jsonDst     string
 		jsonRel     string
-		svgDst      string
-		svgRel      string
+		diagramDst  string
+		diagramRel  string
 		distDst     string
 		distRel     string
 	}
@@ -1361,13 +1361,13 @@ func runAnalyzeBatch(d deps) int {
 		analysisName := stem + "-analysis.json"
 		analysisRel := filepath.Join(analyzedRel, analysisName)
 		jsonRel := filepath.Join(analyzedRel, name)
-		svgName := stem + "-tech.svg"
-		svgRel := filepath.Join(analyzedRel, svgName)
+		diagramName := stem + "-tech.md"
+		diagramRel := filepath.Join(analyzedRel, diagramName)
 		distName := stem + "-tech-dist.md"
 		distRel := filepath.Join(analyzedRel, distName)
 		analysisDst := filepath.Join(analyzed, analysisName)
 		jsonDst := filepath.Join(analyzed, name)
-		svgDst := filepath.Join(analyzed, svgName)
+		diagramDst := filepath.Join(analyzed, diagramName)
 		distDst := filepath.Join(analyzed, distName)
 		if code := rejectAnalyzedDest(d, analysisDst, analysisRel); code != 0 {
 			return code
@@ -1375,7 +1375,7 @@ func runAnalyzeBatch(d deps) int {
 		if code := rejectAnalyzedDest(d, jsonDst, jsonRel); code != 0 {
 			return code
 		}
-		if code := rejectAnalyzedDest(d, svgDst, svgRel); code != 0 {
+		if code := rejectAnalyzedDest(d, diagramDst, diagramRel); code != 0 {
 			return code
 		}
 		if code := rejectAnalyzedDest(d, distDst, distRel); code != 0 {
@@ -1388,8 +1388,8 @@ func runAnalyzeBatch(d deps) int {
 			analysisDst: analysisDst,
 			jsonDst:     jsonDst,
 			jsonRel:     jsonRel,
-			svgDst:      svgDst,
-			svgRel:      svgRel,
+			diagramDst:  diagramDst,
+			diagramRel:  diagramRel,
 			distDst:     distDst,
 			distRel:     distRel,
 		})
@@ -1415,7 +1415,7 @@ func runAnalyzeBatch(d deps) int {
 			fmt.Fprintln(d.Stderr, err.Error())
 			return 1
 		}
-		svg, err := jobad.TechDiagram(analysis)
+		diagram, err := jobad.TechDiagram(analysis)
 		if err != nil {
 			fmt.Fprintln(d.Stderr, err.Error())
 			return 1
@@ -1431,7 +1431,7 @@ func runAnalyzeBatch(d deps) int {
 			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 			return 1
 		}
-		svgAbs, err := filepath.Abs(file.svgDst)
+		diagramAbs, err := filepath.Abs(file.diagramDst)
 		if err != nil {
 			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 			return 1
@@ -1445,10 +1445,10 @@ func runAnalyzeBatch(d deps) int {
 			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 			return 1
 		}
-		if err := writeExclusiveFile(file.svgDst, svg); err != nil {
+		if err := writeTechDiagram(file.diagramDst, diagram); err != nil {
 			_ = os.Remove(file.analysisDst)
 			if errors.Is(err, os.ErrExist) {
-				fmt.Fprintf(d.Stderr, "docs-cli: analyzed file already exists: %s\n", file.svgRel)
+				fmt.Fprintf(d.Stderr, "docs-cli: analyzed file already exists: %s\n", file.diagramRel)
 				return 1
 			}
 			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
@@ -1456,7 +1456,7 @@ func runAnalyzeBatch(d deps) int {
 		}
 		if err := writeTechDistribution(file.distDst, dist); err != nil {
 			_ = os.Remove(file.analysisDst)
-			_ = os.Remove(file.svgDst)
+			_ = os.Remove(file.diagramDst)
 			if errors.Is(err, os.ErrExist) {
 				fmt.Fprintf(d.Stderr, "docs-cli: analyzed file already exists: %s\n", file.distRel)
 				return 1
@@ -1466,19 +1466,19 @@ func runAnalyzeBatch(d deps) int {
 		}
 		if code := rejectAnalyzedDest(d, file.jsonDst, file.jsonRel); code != 0 {
 			_ = os.Remove(file.analysisDst)
-			_ = os.Remove(file.svgDst)
+			_ = os.Remove(file.diagramDst)
 			_ = os.Remove(file.distDst)
 			return code
 		}
 		if err := os.Rename(file.src, file.jsonDst); err != nil {
 			_ = os.Remove(file.analysisDst)
-			_ = os.Remove(file.svgDst)
+			_ = os.Remove(file.diagramDst)
 			_ = os.Remove(file.distDst)
 			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 			return 1
 		}
 		fmt.Fprintln(d.Stdout, abs)
-		fmt.Fprintln(d.Stdout, svgAbs)
+		fmt.Fprintln(d.Stdout, diagramAbs)
 		fmt.Fprintln(d.Stdout, distAbs)
 	}
 	return 0
@@ -1521,6 +1521,17 @@ func rejectTechDistribution(d deps, path string) int {
 		return 1
 	}
 	return 0
+}
+
+// techDiagramWrite overrides the relationship-diagram file write in tests.
+// Nil uses writeExclusiveFile. Tests restore nil.
+var techDiagramWrite func(path string, body []byte) error
+
+func writeTechDiagram(path string, body []byte) error {
+	if techDiagramWrite != nil {
+		return techDiagramWrite(path, body)
+	}
+	return writeExclusiveFile(path, body)
 }
 
 // techDistWrite overrides the distribution file write in tests.
