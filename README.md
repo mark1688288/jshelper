@@ -1,5 +1,9 @@
 # jshelper
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Go 1.27.1](https://img.shields.io/badge/Go-1.27.1-00ADD8?logo=go)](https://go.dev/)
+[![macOS](https://img.shields.io/badge/macOS-Apple%20silicon-black?logo=apple)](https://github.com/mark1688288/jshelper/releases/latest)
+
 `docs-cli` helps us draft cover letters in a systematic workflow. It helps us quickly understand job ads. An LLM assists with `parse`, `analyze`, and `draft`. `draft` references the provided CV and cover letter templates, and an LLM drafts a cover letter for the provided job ad. It can upload parsed and analysis JSON files and create Google Docs in Google Drive.
 
 ## Prerequisites
@@ -65,7 +69,7 @@ docs-cli auth
 
 The second `setup` asks for the client id and secret. `auth` stores the refresh token in the keyring. Sign in as the listed test user. The consent screen stays in Testing; an unlisted account gets `403: access_denied`.
 
-Test connection of Google Drive by creating a Google Docs:
+Test the Google Drive connection by creating a Google Docs:
 
 ```bash
 docs-cli create --title "Testing" --text "Hello world!"
