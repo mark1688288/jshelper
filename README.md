@@ -1,13 +1,6 @@
 # jshelper
 
-Private repository. Module path: `github.com/mark1688288/jshelper`.
-
-```bash
-go env -w GOPRIVATE=github.com/mark1688288/jshelper
-git config url.git@github.com:.insteadOf https://github.com/
-```
-
-`docs-cli` helps us draft cover letters in a systematic workflow. It helps us quickly understand job ads. An LLM assists with `parse`, `analyze`, and `draft`. It can upload parsed and analysis JSON files and create Google Docs in Google Drive.
+`docs-cli` helps us draft cover letters in a systematic workflow. It helps us quickly understand job ads. An LLM assists with `parse`, `analyze`, and `draft`. `draft` references the provided CV and cover letter templates, and an LLM drafts a cover letter for the provided job ad. It can upload parsed and analysis JSON files and create Google Docs in Google Drive.
 
 ## Prerequisites
 
@@ -27,7 +20,7 @@ The full name of `fm` is the Apple Foundation Models command-line interface. It 
 
 Download the Apple silicon release and install it into `/usr/local/bin`. That directory is already on the default macOS `PATH`, so the command is `docs-cli`.
 
-The archive name is `docs-cli_darwin_arm64.tar.gz`. It contains the production `docs-cli` binary and `LICENSE`. GitHub Releases serves it. A private repository only allows an account with access to download it.
+The archive name is `docs-cli_darwin_arm64.tar.gz`. It contains the production `docs-cli` binary, `LICENSE`, `.env.example`, and `config/bootstrap.sh`. GitHub Releases serves it. A private repository only allows an account with access to download it.
 
 ```bash
 curl -fL -o docs-cli_darwin_arm64.tar.gz https://github.com/mark1688288/jshelper/releases/latest/download/docs-cli_darwin_arm64.tar.gz
@@ -41,7 +34,7 @@ If macOS blocks the installed command, clear the download quarantine:
 xattr -d com.apple.quarantine /usr/local/bin/docs-cli
 ```
 
-Run the commands below from the repository root, the directory that contains `.env.example`. `docs-cli` reads `.env` from the current directory.
+Run the commands below from the directory where you extracted the archive. That directory contains `.env.example` and `config/bootstrap.sh`. `docs-cli` reads `.env` from the current directory. `setup` copies `.env.example` to `.env` and runs `config/bootstrap.sh` there.
 
 ### Run wizard to setup
 
@@ -80,10 +73,12 @@ docs-cli create --title "Testing" --text "Hello world!"
 
 ## Security
 
+![workflow](img/google-drive-oauth.jpeg)
+
 The OAuth consent screen stays in Testing. Google expires that refresh token after about 7 days. When `create` fails with `invalid_grant`, run:
 
 ```bash
-./docs-cli auth
+docs-cli auth
 ```
 
 `docs-cli` stores the refresh token with [zalando/go-keyring](https://github.com/zalando/go-keyring) as Keychain item `docs-cli` / `refresh-token`. The payload is JSON with `refresh_token` and `scope`. Access tokens stay in memory.
@@ -165,8 +160,10 @@ docs-cli analyze --batch [--gemini]
 > [!TIP] 
 > Saves file to speicified location by 
 > ```bash
-> ./docs-cli analyze --json PATH > PATH
+> docs-cli analyze --json PATH > PATH
 > ```
+
+An empty requirements list exits 1 with `docs-cli: requirements is empty` and does not run `fm` or Gemini.
 
 #### Folders structure of batch mode:
 
@@ -178,7 +175,9 @@ docs-cli analyze --batch [--gemini]
 ./batch/jobads/analyzed/name-tech-dist.md
 ```
 
-An empty requirements list exits 1 with `docs-cli: requirements is empty` and does not run `fm` or Gemini.
+![workflow](img/analysis-diagrams.jpeg)
+
+`analyze` creates the diagrams that help us quickly understand the job ad's technical requirements.
 
 ### Json Schema
 
@@ -234,6 +233,13 @@ docs-cli create -title "MY Cover Letter" --import ./drafts/cover_letter.pdf
 docs-cli upload parsed.json analysis.json
 ```
 
+## Uninstall
+
+```bash
+rm -f docs-cli_darwin_arm64.tar.gz docs-cli LICENSE .env.example config/bootstrap.sh
+security delete-generic-password -s docs-cli -a refresh-token
+security delete-generic-password -s docs-cli -a gemini-api-key
+```
 
 ## License
 
