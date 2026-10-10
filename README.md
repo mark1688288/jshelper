@@ -3,6 +3,11 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Go 1.27.1](https://img.shields.io/badge/Go-1.27.1-00ADD8?logo=go)](https://go.dev/)
 [![macOS](https://img.shields.io/badge/macOS-Apple%20silicon-black?logo=apple)](https://github.com/mark1688288/jshelper/releases/latest)
+[![Google Drive](https://img.shields.io/badge/Google%20Drive-4285F4?logo=googledrive&logoColor=white)](https://developers.google.com/drive)
+[![Google Docs](https://img.shields.io/badge/Google%20Docs-4285F4?logo=googledocs&logoColor=white)](https://developers.google.com/docs)
+[![Google Gemini](https://img.shields.io/badge/Google%20Gemini-8E75B2?logo=googlegemini&logoColor=white)](https://ai.google.dev/gemini-api)
+[![Apple Intelligence](https://img.shields.io/badge/Apple%20Intelligence-000000?logo=apple&logoColor=white)](https://www.apple.com/apple-intelligence/)
+[![Foundation Models](https://img.shields.io/badge/Foundation%20Models-000000?logo=apple&logoColor=white)](https://developer.apple.com/documentation/foundationmodels)
 
 `docs-cli` helps us draft cover letters in a systematic workflow. It helps us quickly understand job ads. An LLM assists with `parse`, `analyze`, and `draft`. `draft` references the provided CV and cover letter templates, and an LLM drafts a cover letter for the provided job ad. It can upload parsed and analysis JSON files and create Google Docs in Google Drive.
 
@@ -118,7 +123,7 @@ Apple Foundation Models command-line interface (we call it `on-device model` or 
 
 ## Parse
 
-`parse` reads a saved job HTML file and writes JSON. Page uses the first schema.org JobPosting, or the page's paragraphs when that object is absent. `parse` sends only the extracted plain text, with email addresses removed to `fm`. 
+`parse` reads a saved job HTML file and writes JSON. A page uses the first schema.org JobPosting, or the page's paragraphs when that object is absent. `parse` sends only the extracted plain text, with email addresses removed to `fm`. 
 
 ```bash
 docs-cli parse --html PATH [--autoparse]
