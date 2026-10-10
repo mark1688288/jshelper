@@ -16,6 +16,6 @@ Do not open a public issue or pull request for a vulnerability. Do not include a
 
 In scope: how `docs-cli` handles secrets and local files. That includes `.env`, `credentials.json`, the keyring items for the refresh token and the Gemini API key, the OAuth loopback, `config/bootstrap.sh`, file permissions, and file paths.
 
-Out of scope: Google, Google Cloud, the Gemini API, `gcloud`, and JobsDB. A person who already has the local account or the keychain is out of scope.
+Out of scope: Google, Google Cloud, the Gemini API, `gcloud`. A person who already has the local account or the keychain is out of scope.
 
 This is maintained by one person. There is no bug bounty and no response-time guarantee. The aim is to acknowledge a report within 7 days. A confirmed issue is fixed on `main` and published in a GitHub Release. A GitHub Security Advisory is published when the issue affects a supported release.

@@ -118,7 +118,7 @@ Apple Foundation Models command-line interface (we call it `on-device model` or 
 
 ## Parse
 
-`parse` reads a saved job HTML file and writes JSON. A JobsDB page still uses its job-detail fields. Another page uses the first schema.org JobPosting, or the page's paragraphs when that object is absent. `parse` sends only the extracted plain text, with email addresses removed to `fm`. 
+`parse` reads a saved job HTML file and writes JSON. Page uses the first schema.org JobPosting, or the page's paragraphs when that object is absent. `parse` sends only the extracted plain text, with email addresses removed to `fm`. 
 
 ```bash
 docs-cli parse --html PATH [--autoparse]
