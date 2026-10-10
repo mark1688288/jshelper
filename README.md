@@ -38,6 +38,8 @@ From the repository root, the directory that contains `.env.example`. Do not exp
 go build -o docs-cli -ldflags "-X github.com/mark1688288/jshelper/internal/config.defaultAppEnv=production" ./cmd/docs-cli
 ```
 
+### Run wizard to setup
+
 ```bash
 ./docs-cli setup
 ```
@@ -46,10 +48,14 @@ The first round copies `.env` when it is missing, asks `GCP_PROJECT_ID`, `GCP_PR
 
 In that same project, finish these Console pages by hand. Create a Desktop client. Leave Web and IAP clients unused.
 
+Following urls will provided:
+
+```bash
 - Branding: `https://console.cloud.google.com/auth/branding?project=<GCP_PROJECT_ID>`
 - Audience: External, Testing, and your test user. `https://console.cloud.google.com/auth/audience?project=<GCP_PROJECT_ID>`
 - Data Access: add only `https://www.googleapis.com/auth/drive`. `https://console.cloud.google.com/auth/scopes?project=<GCP_PROJECT_ID>`
 - Clients: Desktop app named `Docs CLI Desktop`. `https://console.cloud.google.com/auth/clients?project=<GCP_PROJECT_ID>`
+```
 
 > [!NOTE]
 > Stay in Testing unless you are in a Google Workspace and can complete Google verification for this app.
@@ -60,6 +66,8 @@ In that same project, finish these Console pages by hand. Create a Desktop clien
 ```
 
 The second `setup` asks for the client id and secret. `auth` stores the refresh token in the keyring. Sign in as the listed test user. The consent screen stays in Testing; an unlisted account gets `403: access_denied`.
+
+Test connection of Google Drive by creating a Google Docs:
 
 ```bash
 ./docs-cli create --title "Demo" --text "hello"
@@ -99,56 +107,7 @@ The release binary defaults to production when it is built with this link flag. 
 go build -o docs-cli -ldflags "-X github.com/mark1688288/jshelper/internal/config.defaultAppEnv=production" ./cmd/docs-cli
 ```
 
-## Setup
-
-There is one Console order. The client id exists only after a Desktop client is created in that Cloud project. Browser consent does not create the client id.
-
-1. Decide `GCP_PROJECT_ID`. That id is the Cloud project that owns the OAuth client and the enabled APIs. It is separate from the Drive folder. `GCP_FOLDER_ID` is an optional Cloud Resource Manager folder. `GOOGLE_DRIVE_FOLDER_ID` is the Drive folder, and `create` and `upload` require it.
-
-2. Create the Cloud project when it is missing and enable `docs.googleapis.com` and `drive.googleapis.com`. You need a logged-in `gcloud`. Bootstrap does not create a Drive folder and does not move an OAuth client.
-
-   Development, from the repository root:
-
-   ```bash
-   APP_ENV=development bash config/bootstrap.sh --check
-   bash config/bootstrap.sh
-   ```
-
-   `bash config/bootstrap.sh` reads `.env.example`. An empty OAuth client is expected: the script prints the Console URLs and exits 0.
-
-   Production uses the release binary. From the repository root, run `./docs-cli setup`. If `.env` is missing, it copies `.env.example` to `.env` (mode `0600`) and does not replace an `.env` that already exists. The first round asks only `GCP_PROJECT_ID`, `GCP_PROJECT_NAME`, `GOOGLE_OAUTH_SUPPORT_EMAIL`, `GOOGLE_OAUTH_TEST_USER`, and `GOOGLE_DRIVE_FOLDER_ID`. Press Enter on the project id and name to keep the current value. A new project id clears the client id, the client secret, and the project-ready marker; the Desktop client stays in the old project. After those values are valid, setup runs `APP_ENV=production bash config/bootstrap.sh`, writes `DOCS_CLI_PROJECT_READY` equal to `GCP_PROJECT_ID`, and exits 0. That round does not ask for a client id or secret and does not open a browser.
-
-3. In that same project, finish these Console steps by hand. Create a Desktop client. Leave Web and IAP clients unused.
-
-   - Branding: `https://console.cloud.google.com/auth/branding?project=<GCP_PROJECT_ID>`
-   - Audience: External, Testing, and your test user. `https://console.cloud.google.com/auth/audience?project=<GCP_PROJECT_ID>`
-   - Data Access: add only `https://www.googleapis.com/auth/drive`. `https://console.cloud.google.com/auth/scopes?project=<GCP_PROJECT_ID>`
-   - Clients: Desktop app named `Docs CLI Desktop`. `https://console.cloud.google.com/auth/clients?project=<GCP_PROJECT_ID>`
-
-   Testing can grant this restricted scope to the listed test user. This version does not publish the consent screen, so CASA is not part of setup. The consent screen authorizes this app to see, edit, create, and delete all of your Google Drive files. The program only reads the one folder you name. `create` adds one document there. `upload` adds the JSON files you name.
-
-4. Put the client id and secret into the env file only after that Desktop client exists. Do not commit the secret or the folder id. `Load` rejects the placeholder email `you@gmail.com`.
-
-   Development reads `.env.example` only. Put the client id, client secret, both email addresses, and the Drive folder id there, then:
-
-   ```bash
-   go run ./cmd/docs-cli auth
-   go run ./cmd/docs-cli create --title "Demo" --text "hello" --folder <folder id or folder URL>
-   go run ./cmd/docs-cli upload ./tmp/1.json ./tmp/2.json
-   ```
-
-   Production runs `./docs-cli setup` again. `DOCS_CLI_PROJECT_READY` already matches the project id, so this round asks only for the client id and secret, writes `credentials.json` (mode `0600`), and does not listen on a port.
-
-5. `docs-cli auth` performs loopback consent and stores the refresh token. It does not create the client id. After a scope change, run `docs-cli auth` again. A successful `auth` overwrites the keyring item `docs-cli` / `refresh-token`. The refresh token is not a file in the project directory. The client secret stays in `.env` and `credentials.json`. The first time on macOS, Keychain may ask for permission. Refusing that prompt exits with `docs-cli: keyring unavailable`.
-
-   ```bash
-   ./docs-cli auth
-   ./docs-cli create --title "Demo" --text "hello"
-   ```
-
-Production `./docs-cli create` and `./docs-cli auth` use the same state machine as `setup`. When `DOCS_CLI_PROJECT_READY` is not the current `GCP_PROJECT_ID` and the first-round values are already valid, those commands run bootstrap and then exit 1 with the Desktop app instruction. They do not listen. The client id and secret are asked only when `DOCS_CLI_PROJECT_READY` equals the current `GCP_PROJECT_ID`. The round that writes the marker does not start a listener. Use setup, the Console steps, setup again, then auth.
-
-## Job ads
+## Parse
 
 `parse` reads a saved job HTML file and writes section JSON to stdout. A JobsDB page still uses its job-detail fields. Another page uses the first schema.org JobPosting, or the page's paragraphs when that object is absent. When that page has no requirements, and a hidden `initialHistory` value holds the job HTML, `parse` uses that HTML. A `Post:` line fills the title. A heading that contains the word requirements fills the requirements list. It does not use the refresh token. When parse calls Gemini, the model id is `GEMINI_MODEL` from `.env` in the working directory. A missing or empty value uses the built-in model id. The API key is not read from `.env`.
 
@@ -166,14 +125,84 @@ docs-cli gemini-key
 
 On a terminal, `parse` asks for the key when that item is missing, then stores it. Without a key, `parse` keeps the local heading classification and does not call Gemini. When a key is stored, `parse` sends only the extracted plain text, with email addresses removed. It does not send the HTML page. `parse --autoparse` sends that saved HTML to Gemini and writes the same section JSON. Email addresses are removed before the page is sent. Without `--autoparse`, `parse` does not send the HTML page. `parse --txt PATH` reads a text file of the job details and sends that text to Gemini. Email addresses are removed before the text is sent. It does not need `--autoparse`. `parse --batch` reads every .txt file in ./batch/jobads, one or more, and sends each file to Gemini. It writes the section JSON in ./batch/jobads/parsed and moves that .txt file there. It creates ./batch, ./batch/jobads, and ./batch/jobads/parsed when they are missing. `go test` does not call Gemini.
 
-`analyze` reads that section JSON and writes the requirement JSON to stdout. It uses the on-device model when that model is available. If the on-device model is unavailable and a Gemini API key is already stored, Gemini writes the same analysis JSON. analyze --gemini skips the on-device model and asks Gemini to write the same analysis JSON. The Gemini API key must already be stored. analyze does not ask for a key. analyze --json PATH --gemini and analyze --batch --gemini both take that flag. Without --gemini, analyze still tries the on-device model first. When analyze calls Gemini, the model id is `GEMINI_MODEL` from `.env` in the working directory. A missing or empty value uses the built-in model id. The API key is not read from `.env`. `go test` does not run `/usr/bin/fm` and does not call Gemini. `analyze --batch` reads every .json file in ./batch/jobads/parsed, one or more. It writes name-analysis.json in ./batch/jobads/analyzed and moves that .json file there. It creates ./batch/jobads/analyzed when that directory is missing. ./batch/jobads/parsed must already exist. After a successful analysis, analyze writes a tech relationship diagram as name-tech.md. For analyze --json PATH the file is next to PATH. For analyze --batch it is in ./batch/jobads/analyzed. The file is a Mermaid flowchart. Technologies that share one applies_to and one level are one node, joined with " / ". The arrow is labeled must or advantage. A technology with no applies_to is a node by itself and still shows that level. Must nodes are filled gray. Advantage nodes are hollow. A must arrow is solid. An advantage arrow is dotted. It writes a tech distribution chart as name-tech-dist.md in that same place. The file is a Mermaid quadrantChart plus a table. The horizontal axis is the must count and the vertical axis is the advantage count. A count of zero stays at zero. Points that share a count stay in that count's band and are ordered from top to bottom by their first appearance in tech. Must-only points are filled gray. Advantage-only points are hollow. The table lists each group and its technology names.
+### Json Schema
+
+```json
+{
+  "source": { "type": "string" },
+  "header": {
+    "title_block": { "type": "string" },
+    "company": { "type": "string" },
+    "location": { "type": "string" },
+    "work_type": { "type": "string" },
+    "classification": { "type": "string" }
+  },
+  "benefits": ["type": "array", "items": { "type": "string" } ],
+  "duties": ["type": "array", "items": { "type": "string" } ],
+  "requirements": ["type": "array", "items": { "type": "string" } ],
+  "trailer": ["type": "array", "items": { "type": "string" } ]
+}
+```
+
+## Analyze
+
+`analyze` reads that section JSON and writes the requirement JSON to stdout. It supports one file, `analyze --json PATH`, or a batch, `analyze --batch`. By default it calls Apple `fm`. If `fm` is unavailable and a Gemini API key is already stored, it falls back to Gemini. `--gemini` bypasses the `fm` call.
+
+`analyze --batch` reads every `.json` file in `./batch/jobads/parsed`, moves that file into `./batch/jobads/analyzed`, and writes the analysis files there. `parsed` must already exist. `analyzed` is created when it is missing.
 
 ```bash
 docs-cli analyze --json PATH [--gemini]
 docs-cli analyze --batch [--gemini]
 ```
 
+> [!TIPS] 
+> Saves file to speicified location by 
+> ```bash
+> ./docs-cli analyze --json PATH > PATH
+> ```
+
+#### Folders structure of batch mode:
+
+```bash
+./batch/jobads/parsed/
+./batch/jobads/analyzed/name.json
+./batch/jobads/analyzed/name-analysis.json
+./batch/jobads/analyzed/name-tech.md
+./batch/jobads/analyzed/name-tech-dist.md
+```
+
 An empty requirements list exits 1 with `docs-cli: requirements is empty` and does not run `fm` or Gemini.
+
+### Json Schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "must_have": { "type": "array", "items": { "type": "string" } },
+    "advantage": { "type": "array", "items": { "type": "string" } },
+    "min_years": { "type": ["integer", "null"] },
+    "degree": { "type": ["string", "null"] },
+    "languages": { "type": "array", "items": { "type": "string" } },
+    "tech": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "level": { "type": "string" },
+          "applies_to": { "type": ["string", "null"] }
+        },
+        "required": ["name", "level", "applies_to"]
+      }
+    },
+    "soft_skills": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["must_have", "advantage", "min_years", "degree", "languages", "tech", "soft_skills"]
+}
+```
+
+## Draft
 
 `draft` reads a cover-letter template PDF and the section JSON from `parse`, then writes a letter with the on-device model. The template is a pattern for structure and voice. It also reads the CV or resume PDF named by `--cv`. The on-device model selects the skills, projects, and achievements in that CV that match the job, and drafts the letter from those facts. The letter covers that experience, interest in the employer and fit for the role, and a polite close with a call to action. The CV is not sent to Gemini. The on-device model drafts the whole letter from the job JSON and the template's structure and voice without copying square-bracket placeholders, and the program does not fill those placeholders afterward. The letter keeps the template's breaks: a blank line stays a blank line, and a single newline stays a single newline. The program trims trailing spaces and drops a line that is only a square-bracket placeholder. It needs macOS, Apple Intelligence, and `/usr/bin/fm`. A privileged user must already have run `sudo fm license` on that Mac. The letter is saved in a `drafts` directory in the working directory. Run from the repository root and that directory is `./drafts`. That directory is created if it does not exist. On success, stdout is the absolute path of the letter file. It does not write a Google Doc. Without --pdf it writes a timestamped .txt file in drafts. With --pdf NAME it writes that file name in drafts as a PDF instead, and NAME must end in .pdf. `go test` does not run `/usr/bin/fm` and does not read a real cover-letter template or a real CV.
 
@@ -182,8 +211,37 @@ docs-cli draft --json PATH --template PATH --cv PATH
 docs-cli draft --json PATH --template PATH --cv PATH --pdf NAME.pdf
 ```
 
+## Google Docs
+
+```bash
+docs-cli create -title "MY Cover Letter" --import ./drafts/cover_letter.pdf
+```
+
+## Google Drive
+
+```bash
+docs-cli upload parsed.json analysis.json
+```
+
+
+## License
+
+Copyright (C) 2026 mark1688288.
+
+This program is free software under the GNU General Public License version 3 only. See [LICENSE](LICENSE).
+
+If you distribute this program, or a modified version of it, including inside a commercial product, you must license that work under GPL-3.0 and make the corresponding source available. Using it yourself, without distributing it, does not require you to publish your changes.
+
 ## Credits
 
-Refresh tokens are stored with [zalando/go-keyring](https://github.com/zalando/go-keyring).
+Refresh tokens are stored with [zalando/go-keyring](https://github.com/zalando/go-keyring). Copyright (c) 2016 Zalando SE.
 
-https://github.com/zalando/go-keyring
+Template and CV PDFs are read with [ledongthuc/pdf](https://github.com/ledongthuc/pdf). Copyright (c) 2009 The Go Authors.
+
+Job-page HTML is parsed with [golang.org/x/net/html](https://pkg.go.dev/golang.org/x/net/html). Copyright 2009 The Go Authors.
+
+The OAuth loopback uses [golang.org/x/oauth2](https://pkg.go.dev/golang.org/x/oauth2). Copyright 2009 The Go Authors.
+
+Terminal checks and hidden secret input use [golang.org/x/term](https://pkg.go.dev/golang.org/x/term). Copyright 2009 The Go Authors.
+
+Google Docs and Drive clients come from [google.golang.org/api](https://pkg.go.dev/google.golang.org/api). Copyright (c) 2011 Google Inc.

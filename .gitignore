@@ -1,5 +1,6 @@
 /design
 /testing-flows.md
+/internal.md
 .env
 credentials.json
 token.json
