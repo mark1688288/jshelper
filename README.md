@@ -25,6 +25,7 @@
 
 The full name of `fm` is the Apple Foundation Models command-line interface. It is preinstalled at `/usr/bin/fm` with macOS 27. Apple Foundation Models is the on-device language model behind Apple Intelligence, on a Mac with M1 or later.
 
+
 ## Quick Start
 
 Download the Apple silicon release and install it into `/usr/local/bin`. That directory is already on the default macOS `PATH`, so the command is `docs-cli`.
@@ -80,6 +81,7 @@ Test the Google Drive connection by creating a Google Docs:
 docs-cli create --title "Testing" --text "Hello world!"
 ```
 
+
 ## Security
 
 ![workflow](img/google-drive-oauth.jpeg)
@@ -99,6 +101,7 @@ On macOS, go-keyring writes to Keychain. Keychain encrypts the item at rest and 
 > [!CAUTION] 
 > Do not commit `.env`, `credentials.json`, `token.json`, `/design`, an OAuth client secret, or a personal `GOOGLE_DRIVE_FOLDER_ID`.
 
+
 ## Build
 
 The release binary defaults to production when it is built with this link flag. Run it from the repository root, the directory that contains `.env.example`. A non-empty `APP_ENV` in the process environment overrides the compiled default.
@@ -106,6 +109,7 @@ The release binary defaults to production when it is built with this link flag. 
 ```bash
 go build -o docs-cli -ldflags "-X github.com/mark1688288/jshelper/internal/config.defaultAppEnv=production" ./cmd/docs-cli
 ```
+
 
 ## Google Gemini
 
@@ -117,9 +121,17 @@ When `docs-cli` calls Gemini, the model id is `GEMINI_MODEL` from `.env`. A miss
 docs-cli gemini-key
 ```
 
+> [!IMPORTANT]
+> Please read the section「Unpaid Services」→「How Google Uses Your Data」[^1].
+> Use a Pay-as-you-go billing tier API key only.
+
+[^1]: Quoted from the [Gemini API Additional Terms of Service](https://ai.google.dev/gemini-api/terms).
+
+
 ## Apple Intelligence
 
 Apple Foundation Models command-line interface (we call it `on-device model` or `fm`) will be used in `docs-cli`, Apple Intelligence should turned on. A privileged user must already have run `sudo fm license`.
+
 
 ## Parse
 
@@ -155,6 +167,7 @@ docs-cli parse --batch
 }
 ```
 
+
 ## Analyze
 
 `analyze` reads that section JSON and writes the requirement JSON to stdout. It supports one file, `analyze --json PATH`, or a batch, `analyze --batch`. By default it calls Apple `fm`. If `fm` is unavailable and a Gemini API key is already stored, it falls back to Gemini. `--gemini` bypasses the `fm` call.
@@ -188,6 +201,7 @@ An empty requirements list exits 1 with `docs-cli: requirements is empty` and do
 
 `analyze` creates the diagrams that help us quickly understand the job ad's technical requirements.
 
+
 ### Json Schema
 
 ```json
@@ -217,6 +231,7 @@ An empty requirements list exits 1 with `docs-cli: requirements is empty` and do
 }
 ```
 
+
 ## Draft
 
 `draft` reads a cover-letter template PDF and the section JSON from `parse`, then writes a letter with `fm`. It also reads the CV or resume PDF named by `--cv`. The `fm` selects the skills, projects, and achievements in that CV that match the job, and drafts the letter from those facts. The letter covers that experience, interest in the employer and fit for the role, and a polite close with a call to action. The CV is not sent to Gemini. The `fm` drafts the whole letter from the job JSON and the template's structure. The letter is saved in a `drafts` directory in the working directory. That directory is created if it does not exist. Without `--pdf` it writes a timestamped .txt file in drafts. With `--pdf NAME` it writes a PDF instead.
@@ -226,6 +241,7 @@ docs-cli draft --json PATH --template PATH --cv PATH
 docs-cli draft --json PATH --template PATH --cv PATH --pdf NAME.pdf
 ```
 
+
 ## Google Docs
 
 `create` creates a Google Doc from our cover letter.
@@ -233,6 +249,7 @@ docs-cli draft --json PATH --template PATH --cv PATH --pdf NAME.pdf
 ```bash
 docs-cli create -title "MY Cover Letter" --import ./drafts/cover_letter.pdf
 ```
+
 
 ## Google Drive
 
@@ -242,6 +259,7 @@ docs-cli create -title "MY Cover Letter" --import ./drafts/cover_letter.pdf
 docs-cli upload parsed.json analysis.json
 ```
 
+
 ## Uninstall
 
 ```bash
@@ -250,6 +268,11 @@ security delete-generic-password -s docs-cli -a refresh-token
 security delete-generic-password -s docs-cli -a gemini-api-key
 ```
 
+
+## Demo
+![workflow](img/demo.jpeg)
+
+
 ## License
 
 Copyright (C) 2026 mark1688288.
@@ -257,6 +280,7 @@ Copyright (C) 2026 mark1688288.
 This program is free software under the GNU General Public License version 3 only. See [LICENSE](LICENSE).
 
 If you distribute this program, or a modified version of it, including inside a commercial product, you must license that work under GPL-3.0 and make the corresponding source available. Using it yourself, without distributing it, does not require you to publish your changes.
+
 
 ## Credits
 
