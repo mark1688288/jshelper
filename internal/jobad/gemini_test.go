@@ -1377,7 +1377,7 @@ func assertAnalysisRequest(t *testing.T, cap *captured, key, prompt string) {
 func TestAutoparse(t *testing.T) {
 	const key = "autoparse-library-key"
 	const email = "person@example.com"
-	if len(GeminiParseInstructions) != 15480 || strings.Count(GeminiParseInstructions, "\n") != 59 || strings.HasSuffix(GeminiParseInstructions, "\n") || strings.Count(GeminiParseInstructions, "`") != 566 || strings.Contains(autoparseGeminiSchema, "additionalProperties") {
+	if len(GeminiParseInstructions) != 12793 || strings.Count(GeminiParseInstructions, "\n") != 75 || strings.HasSuffix(GeminiParseInstructions, "\n") || strings.Count(GeminiParseInstructions, "`") != 626 || strings.Contains(autoparseGeminiSchema, "additionalProperties") {
 		t.Fatalf("instructions or schema changed")
 	}
 	page := []byte(`<script>AUTOPARSE-HTML-SENTINEL</script><p>` + email + `</p>`)
