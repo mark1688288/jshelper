@@ -16,3 +16,4 @@ token.json.*.tmp
 drafts/
 /batch
 asset/
+.vscode/
