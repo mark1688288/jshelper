@@ -2073,8 +2073,9 @@ func TestParsePromptsThenMaps(t *testing.T) {
 		if !strings.Contains(cap.url, "generativelanguage.googleapis.com") || strings.Contains(cap.url, "aiplatform.googleapis.com") {
 			t.Fatalf("url %s", cap.url)
 		}
-		if strings.Contains(cap.body, "jobAdDetails") || strings.Contains(cap.body, "Analyst Example") {
-			t.Fatalf("body sent header or html: %s", cap.body)
+		user := geminiUserText(t, cap.body)
+		if strings.Contains(user, "jobAdDetails") || strings.Contains(user, "Analyst Example") || !strings.HasPrefix(user, "Blocks:\n") {
+			t.Fatalf("body sent header or html: %s", user)
 		}
 		if !strings.Contains(cap.body, "Medical insurance") {
 			t.Fatalf("body %s", cap.body)
@@ -2383,7 +2384,8 @@ func TestParseTaleoHistory(t *testing.T) {
 		if strings.Join(got.Duties, "|") != "Buy supplies" || strings.Join(got.Requirements, "|") != "Know stores|OR|Second path" || strings.Join(got.Trailer, "|") != "Post: Supplies Supervisor II|Excel helps" {
 			t.Fatalf("lists %+v", got)
 		}
-		if strings.Contains(cap.body, "CHROME-NOTICE") || strings.Contains(cap.body, apiKey) || strings.Contains(cap.body, "initialHistory") || strings.Contains(cap.body, "<p>") || strings.Contains(cap.url, apiKey) {
+		user := geminiUserText(t, cap.body)
+		if strings.Contains(user, "CHROME-NOTICE") || strings.Contains(cap.body, apiKey) || strings.Contains(user, "initialHistory") || strings.Contains(user, "<p>") || strings.Contains(cap.url, apiKey) || !strings.HasPrefix(user, "Blocks:\n") {
 			t.Fatalf("request url %s body %s", cap.url, cap.body)
 		}
 		if !strings.Contains(cap.body, "Buy supplies") || !strings.Contains(cap.body, "Know stores") || !strings.Contains(cap.body, "Excel helps") {
@@ -2908,6 +2910,24 @@ func TestParseAutoparse(t *testing.T) {
 	}
 }
 
+func geminiUserText(t *testing.T, body string) string {
+	t.Helper()
+	var req struct {
+		Contents []struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 {
+		t.Fatalf("contents %#v", req.Contents)
+	}
+	return req.Contents[0].Parts[0].Text
+}
+
 func assertAutoparseRequest(t *testing.T, cap *geminiCapture, apiKey, page string) {
 	t.Helper()
 	redacted := strings.ReplaceAll(page, "person@example.com", "")
@@ -2942,10 +2962,10 @@ func assertAutoparseRequest(t *testing.T, cap *geminiCapture, apiKey, page strin
 	if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
 		t.Fatal(err)
 	}
-	if len(req.SystemInstruction.Parts) != 1 || req.SystemInstruction.Parts[0].Text != jobad.AutoparseInstructions {
+	if len(req.SystemInstruction.Parts) != 1 || req.SystemInstruction.Parts[0].Text != jobad.GeminiParseInstructions {
 		t.Fatalf("instructions %#v", req.SystemInstruction.Parts)
 	}
-	if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || req.Contents[0].Parts[0].Text != redacted {
+	if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || req.Contents[0].Parts[0].Text != "Page:\n"+redacted {
 		t.Fatalf("user text %q", req.Contents)
 	}
 	if strings.Contains(page, "AUTOPARSE-HTML-SENTINEL") && !strings.Contains(req.Contents[0].Parts[0].Text, "<script>AUTOPARSE-HTML-SENTINEL</script>") {
