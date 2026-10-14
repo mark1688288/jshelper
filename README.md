@@ -170,7 +170,7 @@ docs-cli parse --batch
 
 ## Analyze
 
-`analyze` reads that section JSON and writes the requirement JSON to stdout. It supports one file, `analyze --json PATH`, or a batch, `analyze --batch`. By default it calls Apple `fm`. If `fm` is unavailable and a Gemini API key is already stored, it falls back to Gemini. `--gemini` bypasses the `fm` call.
+`analyze` reads that section JSON and writes the requirement JSON to stdout. It supports one file, `analyze --json PATH`, or a batch, `analyze --batch`. By default it calls Apple `fm`. If `fm` is unavailable and a Gemini API key is already stored, it falls back to Gemini. `--gemini` bypasses the `fm` call. When analyze calls Gemini, the job description is the section JSON it already read: the title, benefits, duties, and requirements. Gemini uses the extraction instructions. The on-device model still uses its own instructions.
 
 `analyze --batch` reads every `.json` file in `./batch/jobads/parsed`, moves that file into `./batch/jobads/analyzed`, and writes the analysis files there. `parsed` must already exist. `analyzed` is created when it is missing.
 

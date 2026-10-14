@@ -69,7 +69,7 @@ func newFMError(stderr []byte) error {
 
 // Analyze runs `fm available`, then `fm respond`, and parses stdout as Analysis.
 // When either fm command exits non-zero and a Gemini API key is already stored,
-// Gemini writes the same Analysis. A successful fm run does not read that key.
+// Gemini writes the Analysis from GeminiJD. A successful fm run does not read that key.
 // A missing, unreadable, or invalid key keeps the fm error and does not call Gemini.
 // An empty requirements list returns ErrRequirementsEmpty and does not run either model.
 // client nil uses the default Gemini HTTP client. Tests pass a client that does not call Gemini.
@@ -79,7 +79,7 @@ func Analyze(doc Document, client *http.Client) (Analysis, error) {
 		return Analysis{}, err
 	}
 	if _, err := callFM([]string{fmPath, "available"}); err != nil {
-		return analyzeWithGemini(text, client, err)
+		return analyzeWithGemini(doc, client, err)
 	}
 	stdout, err := callFM([]string{
 		fmPath,
@@ -91,20 +91,20 @@ func Analyze(doc Document, client *http.Client) (Analysis, error) {
 		"--text", text,
 	})
 	if err != nil {
-		return analyzeWithGemini(text, client, err)
+		return analyzeWithGemini(doc, client, err)
 	}
 	return ParseAnalysis(stdout)
 }
 
 // AnalyzeGemini asks Gemini for an Analysis and does not call fm.
-// The Gemini API key must already be stored. A missing key is
-// errGeminiKeyMissing. AnalyzeGemini does not prompt and does not write
-// the keyring. An empty requirements list returns ErrRequirementsEmpty
-// and does not read the key. A Gemini failure is not retried with fm.
-// client nil uses the default Gemini HTTP client. Tests pass a client
-// that does not call Gemini.
+// The user message is GeminiJD. The Gemini API key must already be stored.
+// A missing key is errGeminiKeyMissing. AnalyzeGemini does not prompt and
+// does not write the keyring. An empty requirements list returns
+// ErrRequirementsEmpty and does not read the key. A Gemini failure is not
+// retried with fm. client nil uses the default Gemini HTTP client.
+// Tests pass a client that does not call Gemini.
 func AnalyzeGemini(doc Document, client *http.Client) (Analysis, error) {
-	text, err := PromptText(doc)
+	text, err := GeminiJD(doc)
 	if err != nil {
 		return Analysis{}, err
 	}
@@ -118,7 +118,11 @@ func AnalyzeGemini(doc Document, client *http.Client) (Analysis, error) {
 	return requestAnalysis(context.Background(), client, key, text)
 }
 
-func analyzeWithGemini(text string, client *http.Client, fmErr error) (Analysis, error) {
+func analyzeWithGemini(doc Document, client *http.Client, fmErr error) (Analysis, error) {
+	text, err := GeminiJD(doc)
+	if err != nil {
+		return Analysis{}, err
+	}
 	key, err := LoadGeminiKey()
 	if err != nil {
 		return Analysis{}, fmErr

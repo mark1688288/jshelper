@@ -890,9 +890,16 @@ func TestAnalyzeGeminiFallback(t *testing.T) {
 	const model = `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"Go","level":"must","applies_to":null}],"soft_skills":[]}`
 	doc := sampleAnalysisDoc()
 	doc.Header.Company = "COMPANY-TOKEN"
-	prompt, err := PromptText(doc)
+	prompt, err := GeminiJD(doc)
 	if err != nil {
 		t.Fatal(err)
+	}
+	fmText, err := PromptText(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prompt == fmText {
+		t.Fatal("gemini jd matches the fm prompt")
 	}
 
 	t.Run("available", func(t *testing.T) {
@@ -1092,9 +1099,16 @@ func TestAnalyzeGeminiDirect(t *testing.T) {
 	const model = `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"Go","level":"must","applies_to":null}],"soft_skills":[]}`
 	doc := sampleAnalysisDoc()
 	doc.Header.Company = "COMPANY-TOKEN"
-	prompt, err := PromptText(doc)
+	prompt, err := GeminiJD(doc)
 	if err != nil {
 		t.Fatal(err)
+	}
+	fmText, err := PromptText(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prompt == fmText {
+		t.Fatal("gemini jd matches the fm prompt")
 	}
 	succeedFM := func(t *testing.T) *int {
 		t.Helper()
@@ -1295,11 +1309,28 @@ func assertAnalysisRequest(t *testing.T, cap *captured, key, prompt string) {
 	if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
 		t.Fatal(err)
 	}
-	if len(req.SystemInstruction.Parts) != 1 || req.SystemInstruction.Parts[0].Text != AnalysisInstructions {
+	if len(req.SystemInstruction.Parts) != 1 || req.SystemInstruction.Parts[0].Text != GeminiAnalysisInstructions {
 		t.Fatalf("instructions %#v", req.SystemInstruction.Parts)
+	}
+	instructions := req.SystemInstruction.Parts[0].Text
+	if !strings.Contains(instructions, "No Hallucination") || !strings.Contains(instructions, "`must_have`") {
+		t.Fatalf("instructions missing extraction marks\n%s", instructions)
+	}
+	if strings.Contains(instructions, "for comparison only") {
+		t.Fatal("gemini instructions kept the fm comparison rule")
 	}
 	if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || req.Contents[0].Parts[0].Text != prompt {
 		t.Fatalf("prompt =\n%s", req.Contents)
+	}
+	user := req.Contents[0].Parts[0].Text
+	if !strings.Contains(cap.body, "Medical") || !strings.Contains(user, `"duties": []`) {
+		t.Fatalf("jd =\n%s", user)
+	}
+	if !strings.Contains(user, "Know Go") || !strings.Contains(user, "React (For Frontend)") {
+		t.Fatalf("requirements missing\n%s", user)
+	}
+	if strings.Contains(user, "Title:\n") || strings.Contains(user, "Benefits:\n") {
+		t.Fatalf("user content is PromptText\n%s", user)
 	}
 	if req.GenerationConfig.Mime != "application/json" {
 		t.Fatalf("mime %s", req.GenerationConfig.Mime)
