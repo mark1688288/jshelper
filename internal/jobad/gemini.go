@@ -27,11 +27,15 @@ const (
 
 	// geminiModel is the Gemini API model id used when GEMINI_MODEL is missing
 	// or empty in the production .env file.
-	geminiModel    = "gemini-3.1-flash-lite"
+	geminiModel    = "gemini-3.8-flash"
 	geminiModelKey = "GEMINI_MODEL"
-	geminiURL      = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel + ":generateContent"
+	// geminiThinkingLevel is generationConfig.thinkingConfig.thinkingLevel on
+	// every generateContent call. HIGH is the Gemini API enum
+	// genai.ThinkingLevelHigh. Thoughts are not requested.
+	geminiThinkingLevel = "HIGH"
+	geminiURL           = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel + ":generateContent"
 
-	geminiTimeout        = 60 * time.Second
+	geminiTimeout        = 300 * time.Second
 	maxKeyringBytes      = 4096
 	maxGeminiResponse    = 1 << 20
 	maxRejectRunes       = 120
@@ -603,10 +607,7 @@ func analysisRequestBody(prompt string) ([]byte, error) {
 				"parts": []any{map[string]any{"text": prompt}},
 			},
 		},
-		"generationConfig": map[string]any{
-			"response_mime_type": "application/json",
-			"response_schema":    json.RawMessage(analysisGeminiSchema),
-		},
+		"generationConfig": geminiGenerationConfig(json.RawMessage(analysisGeminiSchema)),
 	}
 	return json.Marshal(body)
 }
@@ -629,12 +630,20 @@ func geminiRequestBody(prompt string) ([]byte, error) {
 				"parts": []any{map[string]any{"text": prompt}},
 			},
 		},
-		"generationConfig": map[string]any{
-			"response_mime_type": "application/json",
-			"response_schema":    schema,
-		},
+		"generationConfig": geminiGenerationConfig(schema),
 	}
 	return json.Marshal(body)
+}
+
+// geminiGenerationConfig is the generationConfig for one generateContent call.
+func geminiGenerationConfig(schema json.RawMessage) map[string]any {
+	return map[string]any{
+		"response_mime_type": "application/json",
+		"response_schema":    schema,
+		"thinkingConfig": map[string]any{
+			"thinkingLevel": geminiThinkingLevel,
+		},
+	}
 }
 
 func mappingPrompt(blocks []Block) string {
@@ -676,7 +685,8 @@ func geminiCandidateText(raw []byte) (string, error) {
 		Candidates []struct {
 			Content struct {
 				Parts []struct {
-					Text string `json:"text"`
+					Text    string `json:"text"`
+					Thought bool   `json:"thought"`
 				} `json:"parts"`
 			} `json:"content"`
 		} `json:"candidates"`
@@ -686,6 +696,9 @@ func geminiCandidateText(raw []byte) (string, error) {
 	}
 	var text strings.Builder
 	for _, part := range env.Candidates[0].Content.Parts {
+		if part.Thought {
+			continue
+		}
 		text.WriteString(part.Text)
 	}
 	return text.String(), nil
@@ -848,10 +861,7 @@ func autoparseRequestBody(page string) ([]byte, error) {
 				"parts": []any{map[string]any{"text": page}},
 			},
 		},
-		"generationConfig": map[string]any{
-			"response_mime_type": "application/json",
-			"response_schema":    json.RawMessage(autoparseGeminiSchema),
-		},
+		"generationConfig": geminiGenerationConfig(json.RawMessage(autoparseGeminiSchema)),
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

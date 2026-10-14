@@ -1827,7 +1827,7 @@ func TestParseUsesGeminiModelFromEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := requestURL(t)
-		if !strings.Contains(got, "/models/gemini-test-model:generateContent") || strings.Contains(got, "gemini-3.1-flash-lite") || strings.Contains(got, "from-example") {
+		if !strings.Contains(got, "/models/gemini-test-model:generateContent") || strings.Contains(got, "gemini-3.8-flash") || strings.Contains(got, "from-example") {
 			t.Fatalf("url %s", got)
 		}
 	})
@@ -1837,7 +1837,7 @@ func TestParseUsesGeminiModelFromEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := requestURL(t)
-		if !strings.Contains(got, "/models/gemini-3.1-flash-lite:generateContent") || strings.Contains(got, "from-example") {
+		if !strings.Contains(got, "/models/gemini-3.8-flash:generateContent") || strings.Contains(got, "from-example") {
 			t.Fatalf("url %s", got)
 		}
 	})
@@ -1847,7 +1847,7 @@ func TestParseUsesGeminiModelFromEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := requestURL(t)
-		if !strings.Contains(got, "/models/gemini-3.1-flash-lite:generateContent") || strings.Contains(got, "from-example") {
+		if !strings.Contains(got, "/models/gemini-3.8-flash:generateContent") || strings.Contains(got, "from-example") {
 			t.Fatalf("url %s", got)
 		}
 	})
@@ -2278,7 +2278,7 @@ func TestParseOtherSource(t *testing.T) {
 		if strings.Contains(cap.body, "<script") || strings.Contains(cap.body, apiKey) || strings.Contains(cap.body, "loginId") || strings.Contains(cap.body, "Acme Ltd") || strings.Contains(cap.body, "Wan Chai") || strings.Contains(cap.body, "TEMPORARY") || strings.Contains(cap.url, apiKey) {
 			t.Fatalf("request url %s body %s", cap.url, cap.body)
 		}
-		if !strings.Contains(cap.url, "generativelanguage.googleapis.com") || !strings.Contains(cap.url, "gemini-3.1-flash-lite") || strings.Contains(cap.url, "aiplatform.googleapis.com") {
+		if !strings.Contains(cap.url, "generativelanguage.googleapis.com") || !strings.Contains(cap.url, "gemini-3.8-flash") || strings.Contains(cap.url, "aiplatform.googleapis.com") {
 			t.Fatalf("url %s", cap.url)
 		}
 		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
@@ -2917,7 +2917,7 @@ func assertAutoparseRequest(t *testing.T, cap *geminiCapture, apiKey, page strin
 	if strings.Contains(cap.url, apiKey) || strings.Contains(cap.body, apiKey) || strings.Contains(cap.body, "person@example.com") {
 		t.Fatalf("url %s body %s", cap.url, cap.body)
 	}
-	if !strings.Contains(cap.url, "generativelanguage.googleapis.com") || !strings.Contains(cap.url, "gemini-3.1-flash-lite") || strings.Contains(cap.url, "aiplatform.googleapis.com") {
+	if !strings.Contains(cap.url, "generativelanguage.googleapis.com") || !strings.Contains(cap.url, "gemini-3.8-flash") || strings.Contains(cap.url, "aiplatform.googleapis.com") {
 		t.Fatalf("url %s", cap.url)
 	}
 	var req struct {
@@ -2932,8 +2932,11 @@ func assertAutoparseRequest(t *testing.T, cap *geminiCapture, apiKey, page strin
 			} `json:"parts"`
 		} `json:"contents"`
 		GenerationConfig struct {
-			Mime   string          `json:"response_mime_type"`
-			Schema json.RawMessage `json:"response_schema"`
+			Mime           string          `json:"response_mime_type"`
+			Schema         json.RawMessage `json:"response_schema"`
+			ThinkingConfig struct {
+				Level string `json:"thinkingLevel"`
+			} `json:"thinkingConfig"`
 		} `json:"generationConfig"`
 	}
 	if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
@@ -2950,6 +2953,9 @@ func assertAutoparseRequest(t *testing.T, cap *geminiCapture, apiKey, page strin
 	}
 	if req.GenerationConfig.Mime != "application/json" || bytes.Contains(req.GenerationConfig.Schema, []byte(`"additionalProperties"`)) {
 		t.Fatalf("schema %s", req.GenerationConfig.Schema)
+	}
+	if req.GenerationConfig.ThinkingConfig.Level != "HIGH" {
+		t.Fatalf("thinking level %q", req.GenerationConfig.ThinkingConfig.Level)
 	}
 	var schema struct {
 		Required   []string                   `json:"required"`

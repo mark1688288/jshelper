@@ -113,7 +113,7 @@ go build -o docs-cli -ldflags "-X github.com/mark1688288/jshelper/internal/confi
 
 ## Google Gemini
 
-When `docs-cli` calls Gemini, the model id is `GEMINI_MODEL` from `.env`. A missing or empty value uses the built-in model id. The API key is not read from `.env`.
+When `docs-cli` calls Gemini, the model id is `GEMINI_MODEL` from `.env`. A missing or empty value uses the built-in model id. The API key is not read from `.env`. Each request sets `thinkingLevel` to `HIGH`.
 
 `gemini-key` stores a Gemini API key in the keyring item `docs-cli` / `gemini-api-key`. The key is typed at the terminal and is not echoed. It is not a flag, not an environment variable, and it is not written to `.env` or `credentials.json`. `create`, `upload`, `auth`, and `setup` do not read or write that item.
 

@@ -839,6 +839,9 @@ func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block
 				Properties map[string]json.RawMessage `json:"properties"`
 				Required   []string                   `json:"required"`
 			} `json:"response_schema"`
+			ThinkingConfig struct {
+				Level string `json:"thinkingLevel"`
+			} `json:"thinkingConfig"`
 		} `json:"generationConfig"`
 	}
 	if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
@@ -861,6 +864,9 @@ func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block
 	}
 	if _, ok := req.GenerationConfig.ResponseSchema.Properties["company"]; ok {
 		t.Fatalf("schema has company: %s", cap.body)
+	}
+	if req.GenerationConfig.ThinkingConfig.Level != geminiThinkingLevel {
+		t.Fatalf("thinking level %q", req.GenerationConfig.ThinkingConfig.Level)
 	}
 	for _, block := range blocks {
 		if !strings.Contains(cap.body, block.Text) || !strings.Contains(cap.body, block.Heading) {
@@ -1221,6 +1227,14 @@ func TestAnalyzeGeminiDirect(t *testing.T) {
 	})
 }
 
+func TestGeminiCandidateTextSkipsThoughts(t *testing.T) {
+	raw := []byte(`{"candidates":[{"content":{"parts":[{"text":"plan the arrays","thought":true},{"text":"{\"benefits\":[]}"}]}}]}`)
+	got, err := geminiCandidateText(raw)
+	if err != nil || got != `{"benefits":[]}` {
+		t.Fatalf("got %q err %v", got, err)
+	}
+}
+
 func geminiTextEnvelope(t *testing.T, text string) string {
 	t.Helper()
 	outer := map[string]any{
@@ -1271,8 +1285,11 @@ func assertAnalysisRequest(t *testing.T, cap *captured, key, prompt string) {
 			} `json:"parts"`
 		} `json:"contents"`
 		GenerationConfig struct {
-			Mime   string          `json:"response_mime_type"`
-			Schema json.RawMessage `json:"response_schema"`
+			Mime           string          `json:"response_mime_type"`
+			Schema         json.RawMessage `json:"response_schema"`
+			ThinkingConfig struct {
+				Level string `json:"thinkingLevel"`
+			} `json:"thinkingConfig"`
 		} `json:"generationConfig"`
 	}
 	if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
@@ -1286,6 +1303,9 @@ func assertAnalysisRequest(t *testing.T, cap *captured, key, prompt string) {
 	}
 	if req.GenerationConfig.Mime != "application/json" {
 		t.Fatalf("mime %s", req.GenerationConfig.Mime)
+	}
+	if req.GenerationConfig.ThinkingConfig.Level != geminiThinkingLevel {
+		t.Fatalf("thinking level %q", req.GenerationConfig.ThinkingConfig.Level)
 	}
 	schema := req.GenerationConfig.Schema
 	if bytes.Contains(schema, []byte(`"additionalProperties"`)) || !bytes.Contains(schema, []byte(`"enum":["must","advantage"]`)) {
@@ -1392,9 +1412,17 @@ The source field may be empty. The program replaces it.`
 					Text string `json:"text"`
 				} `json:"parts"`
 			} `json:"contents"`
+			GenerationConfig struct {
+				ThinkingConfig struct {
+					Level string `json:"thinkingLevel"`
+				} `json:"thinkingConfig"`
+			} `json:"generationConfig"`
 		}
 		if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
 			t.Fatal(err)
+		}
+		if req.GenerationConfig.ThinkingConfig.Level != geminiThinkingLevel {
+			t.Fatalf("thinking level %q body %s", req.GenerationConfig.ThinkingConfig.Level, cap.body)
 		}
 		if len(req.SystemInstruction.Parts) != 1 || req.SystemInstruction.Parts[0].Text != wantInstructions {
 			t.Fatalf("instructions %#v", req.SystemInstruction.Parts)
