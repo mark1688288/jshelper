@@ -145,6 +145,8 @@ docs-cli parse --batch
 
 `parse --autoparse` sends that saved HTML to Gemini and writes the same section JSON. Email addresses are removed before the page is sent. `parse --txt PATH` reads a text file of the job details and sends that text to Gemini. Email addresses are removed before the text is sent. It does not need `--autoparse`. `parse --batch` reads every .txt file in `./batch/jobads`, one or more, and sends each file to Gemini. It writes the section JSON in `./batch/jobads/parsed` and moves that .txt file there. It creates `./batch`, `./batch/jobads`, and `./batch/jobads/parsed` when they are missing.
 
+When parse calls Gemini, Gemini uses the parse instructions. Section mapping sends the extracted blocks. Autoparse, including `parse --txt` and `parse --batch`, sends the saved page.
+
 > [!NOTE] 
 > The email addresses mentioned here include the user's email on the job recruitment website.
 

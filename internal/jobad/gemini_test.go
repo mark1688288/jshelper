@@ -829,6 +829,11 @@ func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block
 		t.Fatalf("header text was sent: %s", cap.body)
 	}
 	var req struct {
+		SystemInstruction struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"systemInstruction"`
 		Contents []struct {
 			Parts []struct {
 				Text string `json:"text"`
@@ -847,7 +852,10 @@ func assertGeminiRequest(t *testing.T, cap *captured, key string, blocks []Block
 	if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
 		t.Fatal(err)
 	}
-	if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || !strings.HasPrefix(req.Contents[0].Parts[0].Text, "Split these job-ad blocks into benefits, duties, requirements, and trailer.\n") {
+	if len(req.SystemInstruction.Parts) != 1 || req.SystemInstruction.Parts[0].Text != GeminiParseInstructions {
+		t.Fatal("system instruction is not GeminiParseInstructions")
+	}
+	if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || !strings.HasPrefix(req.Contents[0].Parts[0].Text, "Blocks:\n") || strings.Contains(req.Contents[0].Parts[0].Text, "Split these job-ad blocks") {
 		t.Fatalf("prompt: %s", cap.body)
 	}
 	wantRequired := []string{"benefits", "duties", "requirements", "trailer"}
@@ -1369,16 +1377,7 @@ func assertAnalysisRequest(t *testing.T, cap *captured, key, prompt string) {
 func TestAutoparse(t *testing.T) {
 	const key = "autoparse-library-key"
 	const email = "person@example.com"
-	const wantInstructions = `Read the saved job advertisement HTML and extract it into docs-cli section JSON.
-Put pay, allowances, and gratuity in benefits.
-Put responsibilities in duties.
-Put entry requirements and preferable attributes in requirements.
-Put deadlines, remarks, and other advertisement lines that are none of those three in trailer.
-Leave out site navigation, sign-in text, and search chrome.
-Fill header title_block, company, location, work_type, and classification from the advertisement. Use an empty string when the page does not state that field. Do not use a portal title that names the website instead of the job.
-Copy the advertisement wording. Do not invent employers, dates, or requirements.
-The source field may be empty. The program replaces it.`
-	if AutoparseInstructions != wantInstructions || strings.Contains(autoparseGeminiSchema, "additionalProperties") {
+	if len(GeminiParseInstructions) != 15480 || strings.Count(GeminiParseInstructions, "\n") != 59 || strings.HasSuffix(GeminiParseInstructions, "\n") || strings.Count(GeminiParseInstructions, "`") != 566 || strings.Contains(autoparseGeminiSchema, "additionalProperties") {
 		t.Fatalf("instructions or schema changed")
 	}
 	page := []byte(`<script>AUTOPARSE-HTML-SENTINEL</script><p>` + email + `</p>`)
@@ -1455,10 +1454,10 @@ The source field may be empty. The program replaces it.`
 		if req.GenerationConfig.ThinkingConfig.Level != geminiThinkingLevel {
 			t.Fatalf("thinking level %q body %s", req.GenerationConfig.ThinkingConfig.Level, cap.body)
 		}
-		if len(req.SystemInstruction.Parts) != 1 || req.SystemInstruction.Parts[0].Text != wantInstructions {
+		if len(req.SystemInstruction.Parts) != 1 || req.SystemInstruction.Parts[0].Text != GeminiParseInstructions {
 			t.Fatalf("instructions %#v", req.SystemInstruction.Parts)
 		}
-		if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || req.Contents[0].Parts[0].Text != emailRE.ReplaceAllString(string(page), "") {
+		if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 || req.Contents[0].Parts[0].Text != "Page:\n"+emailRE.ReplaceAllString(string(page), "") {
 			t.Fatalf("user text %q", req.Contents)
 		}
 		if strings.Contains(cap.body, "additionalProperties") || strings.Contains(cap.url, "aiplatform.googleapis.com") {
