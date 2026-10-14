@@ -198,6 +198,7 @@ An empty requirements list exits 1 with `docs-cli: requirements is empty` and do
 ```
 
 ![workflow](img/analysis-diagrams.jpeg)
+![workflow](img/jshelper_analyzed-3.jpeg)
 
 `analyze` creates the diagrams that help us quickly understand the job ad's technical requirements.
 
