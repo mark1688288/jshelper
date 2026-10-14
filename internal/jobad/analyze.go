@@ -25,6 +25,10 @@ var ErrAnalysisSchema = errors.New("docs-cli: fm output is not the analysis sche
 // Benefits and duties are context only. Requirements are the hiring conditions.
 const AnalysisInstructions = `Treat only the Requirements section as hiring conditions. Benefits and Duties are for comparison only and must not be written into must_have or advantage. Put a parenthetical condition, such as "For Frontend", in that technology item's applies_to. Put "will be an advantage" and "familiar with" in advantage. Put degree, minimum years of experience, languages, and soft skills in their own fields. When no years of experience are stated, min_years is null. Each tech.level must be "must" or "advantage".`
 
+// GeminiAnalysisInstructions is the systemInstruction when analyze calls Gemini.
+// The bytes are the extraction prompt. fm still uses AnalysisInstructions.
+const GeminiAnalysisInstructions = "You are an expert technical recruiter and data extraction assistant. Analyze the provided Job Description (JD) and extract the key information strictly adhering to the configured JSON response schema.\n\n### Extraction Rules & Field Guidelines:\n1. **General Rule (No Hallucination)**: Base your extraction strictly on the provided text. Do not infer or fabricate unstated requirements. If information for a field is not mentioned, return an empty array `[]` for array fields or `null` for nullable fields.\n2. **`must_have` (array of strings)**: Extract mandatory qualifications, core domain experience, and essential prerequisites. Keep each item concise and atomic.\n3. **`advantage` (array of strings)**: Extract preferred qualifications, \"nice-to-have\" skills, bonus attributes, or preferred certifications (e.g., items marked with \"preferred\", \"plus\", \"advantageous\", or \"desirable\").\n4. **`min_years` (integer or null)**: Extract the minimum total years of professional experience required as an integer (e.g., extract `10` from \"10+ years of software development experience\"). If multiple experience numbers are mentioned, use the primary/overall minimum years required. Return `null` if not specified.\n5. **`degree` (string or null)**: Extract the required educational qualification and relevant majors/fields (e.g., \"Bachelor's degree or higher in Computer Science, Artificial Intelligence, or related fields\"). Return `null` if no degree is mentioned.\n6. **`languages` (array of strings)**: Extract spoken or written human/natural languages required (e.g., \"English\", \"Cantonese\", \"Mandarin\"). Do NOT include programming languages here. Return `[]` if not explicitly stated.\n7. **`tech` (array of objects)**: Extract programming languages, frameworks, platforms, tools, technical methodologies (e.g., MVP), and specialized technical domains (e.g., AI Infrastructure, LLM Guardrails, Machine Learning). For each item, populate:\n   - `name` (string): The concise name of the technology, tool, or technical concept.\n   - `level` (string): MUST be strictly either `\"must\"` (if required or part of core responsibilities/requirements) or `\"advantage\"` (if preferred/nice-to-have). No other values are allowed.\n   - `applies_to` (string or null): The specific context, system, business area, or workflow this technology applies to based on the JD (e.g., \"AI platform lifecycle\", \"compliance and audit processes\", \"rapid implementation\"). Return `null` if it is a general requirement without a specific target context.\n8. **`soft_skills` (array of strings)**: Extract interpersonal, cognitive, leadership, or work-style attributes (e.g., \"Analytical skills\", \"Communication skills\", \"Teamwork\", \"Problem-solving\")."
+
 // AnalysisSchema is the fm --schema argument: the workflow schema as one JSON value.
 const AnalysisSchema = `{"type":"object","properties":{"must_have":{"type":"array","items":{"type":"string"}},"advantage":{"type":"array","items":{"type":"string"}},"min_years":{"type":["integer","null"]},"degree":{"type":["string","null"]},"languages":{"type":"array","items":{"type":"string"}},"tech":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"level":{"type":"string"},"applies_to":{"type":["string","null"]}},"required":["name","level","applies_to"]}},"soft_skills":{"type":"array","items":{"type":"string"}}},"required":["must_have","advantage","min_years","degree","languages","tech","soft_skills"]}`
 
@@ -71,6 +75,43 @@ func PromptText(doc Document) (string, error) {
 	writeBlock(&b, "Duties:", listBody(promptLines(doc.Duties)))
 	writeBlock(&b, "Requirements:", listBody(requirements))
 	return b.String(), nil
+}
+
+// geminiJDDocument is the section JSON inside the Gemini user message.
+// The header has only title_block. Empty lists encode as [].
+type geminiJDDocument struct {
+	Header       geminiJDHeader `json:"header"`
+	Benefits     []string       `json:"benefits"`
+	Duties       []string       `json:"duties"`
+	Requirements []string       `json:"requirements"`
+}
+
+type geminiJDHeader struct {
+	TitleBlock string `json:"title_block"`
+}
+
+// GeminiJD builds the user message when analyze calls Gemini.
+// The label sits outside the JSON. Emails are redacted before encoding.
+// An empty requirements list returns ErrRequirementsEmpty.
+func GeminiJD(doc Document) (string, error) {
+	requirements := promptLines(doc.Requirements)
+	if len(requirements) == 0 {
+		return "", ErrRequirementsEmpty
+	}
+	payload := geminiJDDocument{
+		Header:       geminiJDHeader{TitleBlock: redact(doc.Header.TitleBlock)},
+		Benefits:     promptLines(doc.Benefits),
+		Duties:       promptLines(doc.Duties),
+		Requirements: requirements,
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(payload); err != nil {
+		return "", err
+	}
+	return "Job Description:\n" + buf.String(), nil
 }
 
 func promptLines(items []string) []string {

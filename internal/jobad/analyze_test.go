@@ -110,6 +110,83 @@ func TestPromptOmitsTrailer(t *testing.T) {
 	}
 }
 
+func TestGeminiJD(t *testing.T) {
+	doc := sampleAnalysisDoc()
+	doc.Header.Company = "COMPANY-TOKEN"
+	got, err := GeminiJD(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Job Description:\n" + `{
+  "header": {
+    "title_block": "System Analyst"
+  },
+  "benefits": [
+    "Medical"
+  ],
+  "duties": [],
+  "requirements": [
+    "Know Go",
+    "React (For Frontend)"
+  ]
+}
+`
+	if got != want {
+		t.Fatalf("jd =\n%s\nwant =\n%s", got, want)
+	}
+	for _, banned := range []string{
+		"COMPANY-TOKEN",
+		"LOCATION-TOKEN",
+		"WORKTYPE-TOKEN",
+		"CLASS-TOKEN",
+		"TRAILER-SENTINEL",
+		"source-token",
+		"person@example.com",
+		"Title:\n",
+		"Benefits:\n",
+		"(none)",
+		`\u003c`,
+		`\u0026`,
+	} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("jd contains %q\n%s", banned, got)
+		}
+	}
+
+	angled := doc
+	angled.Header.TitleBlock = "Role <Web> & Data"
+	angled.Benefits = []string{"person@example.com", "", "   "}
+	angled.Duties = []string{"person@example.com"}
+	angled.Requirements = []string{"Use a < b & c"}
+	got, err = GeminiJD(angled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `"title_block": "Role <Web> & Data"`) || !strings.Contains(got, `"benefits": []`) || !strings.Contains(got, `"duties": []`) || !strings.Contains(got, `"Use a < b & c"`) {
+		t.Fatalf("angled =\n%s", got)
+	}
+	if strings.Contains(got, `\u003c`) || strings.Contains(got, `\u0026`) || strings.Contains(got, "person@example.com") || strings.Contains(got, "Medical") {
+		t.Fatalf("angled redaction =\n%s", got)
+	}
+
+	for _, empty := range []Document{{}, {Requirements: []string{}}, {Requirements: []string{"person@example.com"}}} {
+		got, err = GeminiJD(empty)
+		if got != "" || !errors.Is(err, ErrRequirementsEmpty) {
+			t.Fatalf("doc %#v text=%q err=%v", empty.Requirements, got, err)
+		}
+	}
+
+	if !strings.Contains(GeminiAnalysisInstructions, "No Hallucination") || !strings.Contains(GeminiAnalysisInstructions, "`must_have`") {
+		t.Fatal("extraction prompt missing required marks")
+	}
+	if strings.Contains(GeminiAnalysisInstructions, "for comparison only") || strings.HasSuffix(GeminiAnalysisInstructions, "\n") {
+		t.Fatal("extraction prompt kept the fm rule or a trailing newline")
+	}
+	if strings.Contains(AnalysisInstructions, "\n") {
+		t.Fatal("fm instructions contain a newline")
+	}
+}
+
 func TestPromptEmptyRequirements(t *testing.T) {
 	docs := []Document{
 		{},

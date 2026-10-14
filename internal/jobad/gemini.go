@@ -462,7 +462,7 @@ func requestMapping(ctx context.Context, client *http.Client, key string, blocks
 
 // requestAnalysis asks Gemini once for an Analysis object.
 // The key is sent only in the x-goog-api-key header.
-// prompt is PromptText. The instruction bytes are AnalysisInstructions.
+// prompt is GeminiJD. The instruction bytes are GeminiAnalysisInstructions.
 // A transport failure or a body that is not Analysis returns an analysis
 // rejection. The text does not include the HTTP body, the transport error,
 // or the API key. There is no partition reason and no blocks reason.
@@ -599,7 +599,7 @@ func rawJSONString(raw json.RawMessage) (string, bool) {
 func analysisRequestBody(prompt string) ([]byte, error) {
 	body := map[string]any{
 		"systemInstruction": map[string]any{
-			"parts": []any{map[string]any{"text": AnalysisInstructions}},
+			"parts": []any{map[string]any{"text": GeminiAnalysisInstructions}},
 		},
 		"contents": []any{
 			map[string]any{
