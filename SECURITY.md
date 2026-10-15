@@ -2,9 +2,9 @@
 
 ## Supported versions
 
-The supported version is the latest GitHub Release. That release is [1.0.0](https://github.com/mark1688288/jshelper/releases/tag/v1.0.0), tag `v1.0.0`. The supported artifact is `docs-cli_darwin_arm64.tar.gz` on that release. Source for the binary is tag `v1.0.0`.
+The supported version is the latest GitHub Release. That release is [1.1.0](https://github.com/mark1688288/jshelper/releases/tag/v1.1.0), tag `v1.1.0`. The supported artifact is `docs-cli_darwin_arm64.tar.gz` on that release. Source for the binary is tag `v1.1.0`. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
-A newer release replaces 1.0.0 as the supported version. Other commits on `main` are not supported on their own.
+A newer release replaces 1.1.0 as the supported version. Other commits on `main` are not supported on their own.
 
 ## Reporting a vulnerability
 
