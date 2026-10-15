@@ -2766,8 +2766,9 @@ func TestParseAutoparse(t *testing.T) {
 			t.Fatalf("file changed %q err %v", kept, err)
 		}
 		assertAutoparseRequest(t, cap, apiKey, string(details))
-		if strings.Contains(cap.body, "<html") || strings.Contains(cap.body, "<p>") || !strings.Contains(cap.body, "JOB-DETAILS-SENTINEL") {
-			t.Fatalf("body %s", cap.body)
+		user := geminiUserText(t, cap.body)
+		if strings.Contains(user, "<html") || strings.Contains(user, "<p>") || !strings.Contains(user, "JOB-DETAILS-SENTINEL") {
+			t.Fatalf("user %s", user)
 		}
 		assertRefreshUntouched(t)
 		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
