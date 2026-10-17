@@ -121,6 +121,12 @@ When `docs-cli` calls Gemini, the model id is `GEMINI_MODEL` from `.env`. A miss
 docs-cli gemini-key
 ```
 
+`grok-key` stores a Grok API key in the keyring item `docs-cli` / `grok-api-key`. The key is typed at the terminal and is not echoed. It is not a flag, not an environment variable, and it is not written to `.env` or `credentials.json`.
+
+```bash
+docs-cli grok-key
+```
+
 > [!IMPORTANT]
 > Please read the section「Unpaid Services」→「How Google Uses Your Data」[^1].
 > Use a Pay-as-you-go billing tier API key only.
@@ -174,11 +180,13 @@ When parse calls Gemini, Gemini uses the parse instructions. Section mapping sen
 
 `analyze` reads that section JSON and writes the requirement JSON to stdout. It supports one file, `analyze --json PATH`, or a batch, `analyze --batch`. By default it calls Apple `fm`. If `fm` is unavailable and a Gemini API key is already stored, it falls back to Gemini. `--gemini` bypasses the `fm` call. When analyze calls Gemini, the job description is the section JSON it already read: the title, benefits, duties, and requirements. Gemini uses the extraction instructions. The on-device model still uses its own instructions.
 
+`analyze --grok` skips the on-device model and asks Grok to write the same analysis JSON. The Grok API key must already be stored. analyze does not ask for a key. `analyze --json PATH --grok` and `analyze --batch --grok` both take that flag. Without `--grok`, analyze still tries the on-device model first and does not call Grok. When analyze calls Grok, it sends the same job description and the same extraction instructions it sends to Gemini. Each Grok request sets reasoning effort to high.
+
 `analyze --batch` reads every `.json` file in `./batch/jobads/parsed`, moves that file into `./batch/jobads/analyzed`, and writes the analysis files there. `parsed` must already exist. `analyzed` is created when it is missing.
 
 ```bash
-docs-cli analyze --json PATH [--gemini]
-docs-cli analyze --batch [--gemini]
+docs-cli analyze --json PATH [--gemini | --grok]
+docs-cli analyze --batch [--gemini | --grok]
 ```
 
 > [!TIP] 
@@ -269,6 +277,7 @@ docs-cli upload parsed.json analysis.json
 rm -f docs-cli_darwin_arm64.tar.gz docs-cli LICENSE .env.example config/bootstrap.sh
 security delete-generic-password -s docs-cli -a refresh-token
 security delete-generic-password -s docs-cli -a gemini-api-key
+security delete-generic-password -s docs-cli -a grok-api-key
 ```
 
 
