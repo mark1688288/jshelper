@@ -36,8 +36,9 @@ commands:
   parse --txt PATH
   parse --batch
   gemini-key
-  analyze --json PATH [--gemini]
-  analyze --batch [--gemini]
+  grok-key
+  analyze --json PATH [--gemini | --grok]
+  analyze --batch [--gemini | --grok]
   draft --json PATH --template PATH --cv PATH [--pdf NAME]
   upload [--folder FOLDER] PATH [PATH ...]
 
@@ -56,10 +57,13 @@ parse:
 
 gemini-key stores the Gemini API key in the keyring. The key is not a flag.
 
+grok-key stores the Grok API key in the keyring. The key is not a flag.
+
 analyze:
   --json PATH      section JSON from parse
   --batch          analyze every .json file in ./batch/jobads/parsed
   --gemini         skip the on-device model and call Gemini
+  --grok           skip the on-device model and call Grok
 
 draft:
   --json PATH      section JSON from parse
@@ -92,9 +96,15 @@ const (
 	errGeminiKeyTerminal = "docs-cli: gemini api key must be entered in a terminal"
 	errGeminiStored      = "docs-cli: stored gemini api key in keyring"
 
+	errGrokKeyTerminal = "docs-cli: grok api key must be entered in a terminal"
+	errGrokStored      = "docs-cli: stored grok api key in keyring"
+
 	// geminiKeyPrompt is the ReadSecret prompt for gemini-key and for parse
 	// when the keyring item is missing. The typed key is not echoed.
 	geminiKeyPrompt = "Gemini API key（輸入時不顯示）:"
+
+	// grokKeyPrompt is the ReadSecret prompt for grok-key. The typed key is not echoed.
+	grokKeyPrompt = "Grok API key（輸入時不顯示）:"
 
 	// maxHTMLBytes is 2 MiB. parse refuses a larger file before it builds a document.
 	maxHTMLBytes = 2 << 20 // 2097152
@@ -130,6 +140,9 @@ type deps struct {
 	// when fm fails, and analyze --gemini. Nil uses the default client.
 	// Tests pass a client that does not call Gemini.
 	GeminiClient *http.Client
+	// GrokClient is the HTTP client for analyze --grok. Nil uses the default client.
+	// Tests pass a client that does not call api.x.ai.
+	GrokClient *http.Client
 }
 
 func realDeps() deps {
@@ -159,6 +172,8 @@ func run(args []string, d deps) int {
 		return runParse(args[1:], d)
 	case "gemini-key":
 		return runGeminiKey(args[1:], d)
+	case "grok-key":
+		return runGrokKey(args[1:], d)
 	case "analyze":
 		return runAnalyze(args[1:], d)
 	case "draft":
@@ -1162,6 +1177,37 @@ func runGeminiKey(args []string, d deps) int {
 	return 0
 }
 
+func runGrokKey(args []string, d deps) int {
+	fs := newFlagSet("grok-key", d.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	tty, closeTTY := terminalOrNil(d)
+	defer closeTTY()
+	if tty == nil {
+		fmt.Fprintln(d.Stderr, errGrokKeyTerminal)
+		return 1
+	}
+	secret, err := tty.ReadSecret(grokKeyPrompt)
+	if err != nil {
+		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
+		return 1
+	}
+	if secret == "" {
+		return 0
+	}
+	if err := jobad.StoreGrokKey(secret); err != nil {
+		fmt.Fprintln(d.Stderr, err.Error())
+		return 1
+	}
+	fmt.Fprintln(d.Stderr, errGrokStored)
+	return 0
+}
+
 func runAnalyze(args []string, d deps) int {
 	restore := bindGeminiEnvRoot(d)
 	defer restore()
@@ -1169,10 +1215,15 @@ func runAnalyze(args []string, d deps) int {
 	jsonFlag := fs.String("json", "", "section JSON from parse")
 	batch := fs.Bool("batch", false, "analyze every .json file in ./batch/jobads/parsed")
 	gemini := fs.Bool("gemini", false, "skip the on-device model and call Gemini")
+	grok := fs.Bool("grok", false, "skip the on-device model and call Grok")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() > 0 {
+		fmt.Fprint(d.Stderr, usageText)
+		return 2
+	}
+	if *gemini && *grok {
 		fmt.Fprint(d.Stderr, usageText)
 		return 2
 	}
@@ -1191,7 +1242,7 @@ func runAnalyze(args []string, d deps) int {
 		return 2
 	}
 	if batchSet && *batch {
-		return runAnalyzeBatch(d, *gemini)
+		return runAnalyzeBatch(d, *gemini, *grok)
 	}
 	if !jsonSet || *jsonFlag == "" {
 		fmt.Fprint(d.Stderr, usageText)
@@ -1226,7 +1277,7 @@ func runAnalyze(args []string, d deps) int {
 	if code := rejectTechDistribution(d, distPath); code != 0 {
 		return code
 	}
-	analysis, err := analyzeDocument(doc, d, *gemini)
+	analysis, err := analyzeDocument(doc, d, *gemini, *grok)
 	if err != nil {
 		fmt.Fprintln(d.Stderr, err.Error())
 		return 1
@@ -1268,7 +1319,7 @@ func runAnalyze(args []string, d deps) int {
 // runAnalyzeBatch analyzes each one-level .json file in ./batch/jobads/parsed.
 // parsed must already exist. analyzed is created at mode 0700 when it is missing.
 // An existing analyzed directory keeps its mode. A file or symlink is not replaced.
-func runAnalyzeBatch(d deps, gemini bool) int {
+func runAnalyzeBatch(d deps, gemini, grok bool) int {
 	wd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
@@ -1417,7 +1468,7 @@ func runAnalyzeBatch(d deps, gemini bool) int {
 			fmt.Fprintf(d.Stderr, "docs-cli: error: %s\n", err.Error())
 			return 1
 		}
-		analysis, err := analyzeDocument(doc, d, gemini)
+		analysis, err := analyzeDocument(doc, d, gemini, grok)
 		if err != nil {
 			fmt.Fprintln(d.Stderr, err.Error())
 			return 1
@@ -1491,7 +1542,10 @@ func runAnalyzeBatch(d deps, gemini bool) int {
 	return 0
 }
 
-func analyzeDocument(doc jobad.Document, d deps, gemini bool) (jobad.Analysis, error) {
+func analyzeDocument(doc jobad.Document, d deps, gemini, grok bool) (jobad.Analysis, error) {
+	if grok {
+		return jobad.AnalyzeGrok(doc, d.GrokClient)
+	}
 	if gemini {
 		return jobad.AnalyzeGemini(doc, d.GeminiClient)
 	}
