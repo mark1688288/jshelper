@@ -696,8 +696,9 @@ func TestCommittedExampleStaysBlank(t *testing.T) {
 		t.Fatal(err)
 	}
 	model, modelOK := vals["GEMINI_MODEL"]
-	if vals["GOOGLE_OAUTH_CLIENT_ID"] != "" || vals["GOOGLE_OAUTH_CLIENT_SECRET"] != "" || vals["GOOGLE_DRIVE_FOLDER_ID"] != "" || !modelOK || model != "" {
-		t.Fatalf("client=%q secret=%q folder=%q model=%q present=%v", vals["GOOGLE_OAUTH_CLIENT_ID"], vals["GOOGLE_OAUTH_CLIENT_SECRET"], vals["GOOGLE_DRIVE_FOLDER_ID"], model, modelOK)
+	grok, grokOK := vals["GROK_MODEL"]
+	if vals["GOOGLE_OAUTH_CLIENT_ID"] != "" || vals["GOOGLE_OAUTH_CLIENT_SECRET"] != "" || vals["GOOGLE_DRIVE_FOLDER_ID"] != "" || !modelOK || model != "" || !grokOK || grok != "" {
+		t.Fatalf("client=%q secret=%q folder=%q model=%q present=%v grok=%q grokPresent=%v", vals["GOOGLE_OAUTH_CLIENT_ID"], vals["GOOGLE_OAUTH_CLIENT_SECRET"], vals["GOOGLE_DRIVE_FOLDER_ID"], model, modelOK, grok, grokOK)
 	}
 }
 

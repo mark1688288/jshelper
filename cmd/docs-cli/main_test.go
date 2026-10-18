@@ -1713,6 +1713,9 @@ func TestParseUsage(t *testing.T) {
 		{name: "gemini key flag", args: []string{"gemini-key", "--key", leaked}},
 		{name: "gemini help", args: []string{"gemini-key", "--help"}, exact: true},
 		{name: "gemini html", args: []string{"gemini-key", "--html", "page.html"}},
+		{name: "grok extra", args: []string{"grok-key", "extra"}},
+		{name: "grok key flag", args: []string{"grok-key", "--key", leaked}},
+		{name: "grok help", args: []string{"grok-key", "--help"}, exact: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1735,9 +1738,12 @@ func TestParseUsage(t *testing.T) {
 			if _, err := keyring.Get("docs-cli", "gemini-api-key"); !errors.Is(err, keyring.ErrNotFound) {
 				t.Fatalf("keyring err %v", err)
 			}
+			if _, err := keyring.Get("docs-cli", "grok-api-key"); !errors.Is(err, keyring.ErrNotFound) {
+				t.Fatalf("grok keyring err %v", err)
+			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  parse --html PATH [--autoparse]\n  parse --txt PATH\n  parse --batch\n  gemini-key\n") {
+	if !strings.Contains(usageText, "\n  parse --html PATH [--autoparse]\n  parse --txt PATH\n  parse --batch\n  gemini-key\n  grok-key\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
 	}
 	if !strings.Contains(usageText, "\n  --batch          parse every .txt file in ./batch/jobads\n") {
@@ -1934,6 +1940,100 @@ func TestGeminiKeyStoresInKeyring(t *testing.T) {
 			t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
 		}
 		got, err := jobad.LoadGeminiKey()
+		if err != nil || got != "kept-key" {
+			t.Fatalf("key %q err %v", got, err)
+		}
+	})
+}
+
+func TestGrokKeyStoresInKeyring(t *testing.T) {
+	const apiKey = "tty-grok-key-value"
+	const stdinKey = "stdin-secret-should-not-store"
+
+	t.Run("stores", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		if err := jobad.StoreGeminiKey("gemini-stays"); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		envPath := filepath.Join(dir, ".env")
+		if err := os.WriteFile(envPath, []byte("KEEP=1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		tty := &fakeTTY{terminal: true, secrets: []string{apiKey}}
+		var stdout, stderr bytes.Buffer
+		d := deps{
+			Stdin:   strings.NewReader(stdinKey),
+			Stdout:  &stdout,
+			Stderr:  &stderr,
+			Root:    dir,
+			TTY:     tty,
+			Environ: []string{"APP_ENV=production"},
+		}
+		forbidEnv(t, &d)
+		code := run([]string{"grok-key"}, d)
+		if code != 0 || stdout.Len() != 0 || stderr.String() != errGrokStored+"\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+		}
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+		assertNoSecret(t, stdout.String(), stderr.String(), stdinKey)
+		if len(tty.prompts) != 1 || tty.prompts[0] != grokKeyPrompt {
+			t.Fatalf("prompts %q", tty.prompts)
+		}
+		raw, err := keyring.Get("docs-cli", "grok-api-key")
+		if err != nil || raw != `{"api_key":"`+apiKey+`"}` {
+			t.Fatalf("stored %q err %v", raw, err)
+		}
+		gemini, err := jobad.LoadGeminiKey()
+		if err != nil || gemini != "gemini-stays" {
+			t.Fatalf("gemini %q err %v", gemini, err)
+		}
+		assertRefreshUntouched(t)
+		got, err := os.ReadFile(envPath)
+		if err != nil || string(got) != "KEEP=1\n" {
+			t.Fatalf(".env %q err %v", got, err)
+		}
+	})
+
+	t.Run("needs terminal", func(t *testing.T) {
+		keyring.MockInit()
+		tty := &fakeTTY{terminal: false, secrets: []string{apiKey}}
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"grok-key"}, deps{Stdin: strings.NewReader(apiKey), Stdout: &stdout, Stderr: &stderr, TTY: tty})
+		if code != 1 || stdout.Len() != 0 || stderr.String() != errGrokKeyTerminal+"\n" {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+		}
+		if len(tty.prompts) != 0 {
+			t.Fatalf("prompted %q", tty.prompts)
+		}
+		assertNoSecret(t, stdout.String(), stderr.String(), apiKey)
+		if _, err := keyring.Get("docs-cli", "grok-api-key"); !errors.Is(err, keyring.ErrNotFound) {
+			t.Fatalf("keyring err %v", err)
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		code = run([]string{"grok-key"}, deps{Stdin: strings.NewReader(apiKey), Stdout: &stdout, Stderr: &stderr})
+		if code != 1 || stderr.String() != errGrokKeyTerminal+"\n" || stdout.Len() != 0 {
+			t.Fatalf("nil tty exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("empty does not overwrite", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGrokKey("kept-key"); err != nil {
+			t.Fatal(err)
+		}
+		tty := &fakeTTY{terminal: true, secrets: []string{""}}
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"grok-key"}, deps{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, TTY: tty})
+		if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("exit %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+		}
+		got, err := jobad.LoadGrokKey()
 		if err != nil || got != "kept-key" {
 			t.Fatalf("key %q err %v", got, err)
 		}
@@ -4020,9 +4120,22 @@ func TestAnalyzeFMSuccessSkipsGemini(t *testing.T) {
 	var calls [][]string
 	scriptedFM(t, &calls, fmStep{}, fmStep{stdout: fmModel + "\n"})
 	hits := 0
-	stdout, stderr, code := runAnalyzeClient(t, path, countingGemini(t, http.StatusOK, analysisEnvelope(t, geminiModel), &hits, &geminiCapture{}))
-	if code != 0 || stderr != "" || hits != 0 || !strings.Contains(stdout, "FROM-FM") || strings.Contains(stdout, "FROM-GEMINI") {
-		t.Fatalf("exit %d hits %d stdout %s stderr %q", code, hits, stdout, stderr)
+	grokHits := 0
+	var stdoutBuf, stderrBuf bytes.Buffer
+	d := deps{
+		Stdin:        strings.NewReader(""),
+		Stdout:       &stdoutBuf,
+		Stderr:       &stderrBuf,
+		Root:         t.TempDir(),
+		Environ:      []string{"APP_ENV=production"},
+		GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, geminiModel), &hits, &geminiCapture{}),
+		GrokClient:   countingGemini(t, http.StatusOK, grokEnvelope(t, geminiModel), &grokHits, &geminiCapture{}),
+	}
+	forbidEnv(t, &d)
+	code := run([]string{"analyze", "--json", path}, d)
+	stdout, stderr := stdoutBuf.String(), stderrBuf.String()
+	if code != 0 || stderr != "" || hits != 0 || grokHits != 0 || !strings.Contains(stdout, "FROM-FM") || strings.Contains(stdout, "FROM-GEMINI") {
+		t.Fatalf("exit %d hits %d grok %d stdout %s stderr %q", code, hits, grokHits, stdout, stderr)
 	}
 	if len(calls) != 2 {
 		t.Fatalf("calls %#v", calls)
@@ -4494,6 +4607,395 @@ func TestAnalyzeWithGeminiFlag(t *testing.T) {
 	})
 }
 
+func TestAnalyzeWithGrokFlag(t *testing.T) {
+	const apiKey = "analyze-grok-key"
+	const company = "COMPANY-TOKEN"
+	model := `{"must_have":["Know Go"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"R&D","level":"must","applies_to":"For Frontend"}],"soft_skills":[]}`
+	doc := jobad.Document{
+		Source: "source-token-9f3a.html",
+		Header: jobad.Header{
+			TitleBlock:     "System Analyst",
+			Company:        company,
+			Location:       "LOCATION-TOKEN",
+			WorkType:       "WORKTYPE-TOKEN",
+			Classification: "CLASS-TOKEN",
+		},
+		Benefits:     []string{"Medical person@example.com"},
+		Requirements: []string{"Know Go"},
+		Trailer:      []string{"TRAILER-SENTINEL"},
+	}
+	want := string(analysisFileBytes(t, model))
+
+	t.Run("writes analysis without fm or gemini", func(t *testing.T) {
+		keyring.MockInit()
+		if err := keyring.Set("docs-cli", "refresh-token", testRefreshItem); err != nil {
+			t.Fatal(err)
+		}
+		if err := jobad.StoreGrokKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		body := jobFileBytes(t, doc)
+		path := writeAt(t, filepath.Join(dir, "jd.json"), body)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: `{"must_have":["FROM-FM"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[],"soft_skills":[]}`})
+		hits := 0
+		geminiHits := 0
+		cap := &geminiCapture{}
+		tty := &fakeTTY{terminal: true, secrets: []string{apiKey}}
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path, "--grok"}, deps{
+			TTY:          tty,
+			GrokClient:   countingGemini(t, http.StatusOK, grokEnvelope(t, model), &hits, cap),
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, model), &geminiHits, &geminiCapture{}),
+		})
+		if code != 0 || stderr != "" || stdout != want {
+			t.Fatalf("exit %d stderr %q stdout\n%s", code, stderr, stdout)
+		}
+		if hits != 1 || geminiHits != 0 || len(calls) != 0 || len(tty.prompts) != 0 {
+			t.Fatalf("hits %d gemini %d calls %#v prompts %q", hits, geminiHits, calls, tty.prompts)
+		}
+		if strings.Contains(stdout, "FROM-FM") || strings.Contains(stdout, "REASONING-SECRET") || strings.Contains(stdout, "jd-tech.md") {
+			t.Fatalf("stdout %s", stdout)
+		}
+		assertCLIGrokRequest(t, cap, apiKey, doc)
+		if _, err := os.ReadFile(filepath.Join(dir, "jd-tech.md")); err != nil {
+			t.Fatal(err)
+		}
+		assertFileBytes(t, path, body)
+		assertRefreshUntouched(t)
+		assertNoSecret(t, stdout, stderr, apiKey)
+	})
+
+	t.Run("false still uses fm", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGrokKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		fmModel := `{"must_have":["FROM-FM"],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[],"soft_skills":[]}`
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{}, fmStep{stdout: fmModel + "\n"})
+		hits := 0
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--grok=false", "--json", path}, deps{
+			GrokClient:   countingGemini(t, http.StatusOK, grokEnvelope(t, model), &hits, &geminiCapture{}),
+			GeminiClient: blockGemini(t),
+		})
+		if code != 0 || stderr != "" || hits != 0 || len(calls) != 2 || !strings.Contains(stdout, "FROM-FM") {
+			t.Fatalf("exit %d hits %d calls %d stdout %s stderr %q", code, hits, len(calls), stdout, stderr)
+		}
+	})
+
+	t.Run("missing key", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: model})
+		hits := 0
+		tty := &fakeTTY{terminal: true, secrets: []string{"should-not-ask"}}
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--grok", "--json", path}, deps{
+			Stdin:        strings.NewReader("should-not-ask\n"),
+			TTY:          tty,
+			GrokClient:   countingGemini(t, http.StatusOK, grokEnvelope(t, model), &hits, &geminiCapture{}),
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: grok api key is not in the keyring\n" || hits != 0 || len(calls) != 0 || len(tty.prompts) != 0 {
+			t.Fatalf("exit %d hits %d calls %#v prompts %q stdout %q stderr %q", code, hits, calls, tty.prompts, stdout, stderr)
+		}
+		assertAbsent(t, filepath.Join(dir, "jd-tech.md"))
+	})
+
+	t.Run("empty requirements", func(t *testing.T) {
+		keyring.MockInitWithError(errors.New("do-not-read-grok"))
+		t.Cleanup(func() { keyring.MockInit() })
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, jobad.Document{Requirements: []string{"person@example.com"}}))
+		var calls [][]string
+		scriptedFM(t, &calls)
+		hits := 0
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--grok", "--json", path}, deps{
+			GrokClient: countingGemini(t, http.StatusOK, grokEnvelope(t, model), &hits, &geminiCapture{}),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: requirements is empty\n" || hits != 0 || len(calls) != 0 || strings.Contains(stderr, "keyring") {
+			t.Fatalf("exit %d hits %d calls %#v stdout %q stderr %q", code, hits, calls, stdout, stderr)
+		}
+	})
+
+	t.Run("bad level", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGrokKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: model})
+		bad := `{"must_have":[],"advantage":[],"min_years":null,"degree":null,"languages":[],"tech":[{"name":"Go","level":"expert","applies_to":null}],"soft_skills":[]}`
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path, "--grok"}, deps{
+			GrokClient:   mappingClient(t, http.StatusOK, grokEnvelope(t, bad), &geminiCapture{}),
+			GeminiClient: blockGemini(t),
+		})
+		if code != 1 || stdout != "" || stderr != "docs-cli: grok analysis rejected: response\n" || len(calls) != 0 || strings.Contains(stderr, "docs-cli: fm:") || strings.Contains(stderr, "expert") {
+			t.Fatalf("exit %d calls %#v stdout %q stderr %q", code, calls, stdout, stderr)
+		}
+		assertAbsent(t, filepath.Join(dir, "jd-tech.md"))
+	})
+
+	t.Run("status 401", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGrokKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: model})
+		body := `{"error":{"type":"auth_error","message":"bad credentials","code":"` + apiKey + `"}}`
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--grok", "--json", path}, deps{
+			GrokClient:   mappingClient(t, http.StatusUnauthorized, body, &geminiCapture{}),
+			GeminiClient: blockGemini(t),
+		})
+		wantErr := "docs-cli: grok analysis rejected: status 401\n" +
+			"docs-cli: grok analysis rejected: auth_error: bad credentials\n"
+		if code != 1 || stdout != "" || stderr != wantErr || len(calls) != 0 || strings.Contains(stderr, "docs-cli: fm:") || strings.Contains(stderr, apiKey) {
+			t.Fatalf("exit %d calls %#v stdout %q stderr %q", code, calls, stdout, stderr)
+		}
+		assertAbsent(t, filepath.Join(dir, "jd-tech.md"))
+	})
+
+	t.Run("batch", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGrokKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		aBody := jobFileBytes(t, batchJob("Know A"))
+		bBody := jobFileBytes(t, batchJob("Know B"))
+		writeAt(t, filepath.Join(parsed, "a.json"), aBody)
+		writeAt(t, filepath.Join(parsed, "b.json"), bBody)
+		var calls [][]string
+		scriptedFM(t, &calls, fmStep{stdout: batchModel("FROM-FM")})
+		hits := 0
+		geminiHits := 0
+		var caps []geminiCapture
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch", "--grok"}, deps{
+			GrokClient: sequenceGemini(t, &hits, &caps, []geminiHTTPStep{
+				{status: http.StatusOK, body: grokEnvelope(t, batchModel("Know A"))},
+				{status: http.StatusOK, body: grokEnvelope(t, batchModel("Know B"))},
+			}),
+			GeminiClient: countingGemini(t, http.StatusOK, analysisEnvelope(t, batchModel("FROM-GEMINI")), &geminiHits, &geminiCapture{}),
+		})
+		aAbs, err := filepath.Abs(filepath.Join(analyzed, "a-analysis.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		aMD, err := filepath.Abs(filepath.Join(analyzed, "a-tech.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		aDist, err := filepath.Abs(filepath.Join(analyzed, "a-tech-dist.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		bAbs, err := filepath.Abs(filepath.Join(analyzed, "b-analysis.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		bMD, err := filepath.Abs(filepath.Join(analyzed, "b-tech.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		bDist, err := filepath.Abs(filepath.Join(analyzed, "b-tech-dist.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code != 0 || stderr != "" || stdout != aAbs+"\n"+aMD+"\n"+aDist+"\n"+bAbs+"\n"+bMD+"\n"+bDist+"\n" {
+			t.Fatalf("exit %d stderr %q stdout %q", code, stderr, stdout)
+		}
+		if hits != 2 || geminiHits != 0 || len(calls) != 0 || len(caps) != 2 {
+			t.Fatalf("hits %d gemini %d calls %#v caps %d", hits, geminiHits, calls, len(caps))
+		}
+		for _, cap := range caps {
+			if cap.url != "https://api.x.ai/v1/responses" || strings.Contains(cap.body, company) || strings.Contains(cap.body, apiKey) || cap.header.Get("Authorization") != "Bearer "+apiKey {
+				t.Fatalf("request url %s header %q body %s", cap.url, cap.header.Get("Authorization"), cap.body)
+			}
+		}
+		assertFileBytes(t, filepath.Join(analyzed, "a.json"), aBody)
+		assertFileBytes(t, filepath.Join(analyzed, "b.json"), bBody)
+		assertAbsent(t, filepath.Join(parsed, "a.json"))
+		assertAbsent(t, filepath.Join(parsed, "b.json"))
+	})
+
+	t.Run("batch second failure", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGrokKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		parsed := makeParsed(t, dir)
+		analyzed := filepath.Join(dir, "batch", "jobads", "analyzed")
+		aBody := jobFileBytes(t, batchJob("Know A"))
+		bBody := jobFileBytes(t, batchJob("Know B"))
+		writeAt(t, filepath.Join(parsed, "a.json"), aBody)
+		writeAt(t, filepath.Join(parsed, "b.json"), bBody)
+		var calls [][]string
+		scriptedFM(t, &calls)
+		hits := 0
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--batch", "--grok"}, deps{
+			GrokClient: sequenceGemini(t, &hits, nil, []geminiHTTPStep{
+				{status: http.StatusOK, body: grokEnvelope(t, batchModel("Know A"))},
+				{status: http.StatusUnauthorized, body: `{"error":{"type":"auth_error","message":"bad credentials"}}`},
+			}),
+			GeminiClient: blockGemini(t),
+		})
+		aAbs, err := filepath.Abs(filepath.Join(analyzed, "a-analysis.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		aMD, err := filepath.Abs(filepath.Join(analyzed, "a-tech.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		aDist, err := filepath.Abs(filepath.Join(analyzed, "a-tech-dist.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantErr := "docs-cli: grok analysis rejected: status 401\n" +
+			"docs-cli: grok analysis rejected: auth_error: bad credentials\n"
+		if code != 1 || stdout != aAbs+"\n"+aMD+"\n"+aDist+"\n" || stderr != wantErr || hits != 2 || len(calls) != 0 {
+			t.Fatalf("exit %d hits %d calls %#v stdout %q stderr %q", code, hits, calls, stdout, stderr)
+		}
+		assertFileBytes(t, filepath.Join(analyzed, "a-analysis.json"), analysisFileBytes(t, batchModel("Know A")))
+		assertFileBytes(t, filepath.Join(analyzed, "a-tech.md"), mustRead(t, filepath.Join(analyzed, "a-tech.md")))
+		assertFileBytes(t, filepath.Join(analyzed, "a.json"), aBody)
+		assertFileBytes(t, filepath.Join(parsed, "b.json"), bBody)
+		assertAbsent(t, filepath.Join(parsed, "a.json"))
+		assertAbsent(t, filepath.Join(analyzed, "b-analysis.json"))
+		assertAbsent(t, filepath.Join(analyzed, "b-tech.md"))
+		assertAbsent(t, filepath.Join(analyzed, "b.json"))
+	})
+
+	t.Run("model from env", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGrokKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte("GROK_MODEL=from-example\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GROK_MODEL=grok-test-model\nGEMINI_MODEL=gemini-test-model\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		var calls [][]string
+		scriptedFM(t, &calls)
+		cap := &geminiCapture{}
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--json", path, "--grok"}, deps{
+			GrokClient: mappingClient(t, http.StatusOK, grokEnvelope(t, model), cap),
+		})
+		if code != 0 || stderr != "" || stdout != want || len(calls) != 0 {
+			t.Fatalf("exit %d calls %#v stdout %s stderr %q", code, calls, stdout, stderr)
+		}
+		if cap.url != "https://api.x.ai/v1/responses" || strings.Contains(cap.url, "grok-test-model") || strings.Contains(cap.url, "gemini-test-model") || strings.Contains(cap.url, "from-example") {
+			t.Fatalf("url %s", cap.url)
+		}
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Model != "grok-test-model" || strings.Contains(cap.body, "gemini-test-model") || strings.Contains(cap.body, "from-example") {
+			t.Fatalf("model %q body %s", req.Model, cap.body)
+		}
+	})
+
+	t.Run("symlink env uses built-in model", func(t *testing.T) {
+		keyring.MockInit()
+		if err := jobad.StoreGrokKey(apiKey); err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "secret.env"), []byte("GROK_MODEL=from-link\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("secret.env", filepath.Join(dir, ".env")); err != nil {
+			t.Fatal(err)
+		}
+		path := writeAt(t, filepath.Join(dir, "jd.json"), jobFileBytes(t, doc))
+		cap := &geminiCapture{}
+		stdout, stderr, code := runBatch(t, dir, []string{"analyze", "--grok", "--json", path}, deps{
+			GrokClient: mappingClient(t, http.StatusOK, grokEnvelope(t, model), cap),
+		})
+		if code != 0 || stderr != "" || stdout != want {
+			t.Fatalf("exit %d stdout %s stderr %q", code, stdout, stderr)
+		}
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Model != "grok-4.7" || strings.Contains(cap.url, "from-link") || strings.Contains(cap.body, "from-link") {
+			t.Fatalf("model %q url %s", req.Model, cap.url)
+		}
+	})
+}
+
+func assertCLIGrokRequest(t *testing.T, cap *geminiCapture, apiKey string, doc jobad.Document) {
+	t.Helper()
+	prompt, err := jobad.GeminiJD(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap.url != "https://api.x.ai/v1/responses" || strings.Contains(cap.url, apiKey) || strings.Contains(cap.body, apiKey) {
+		t.Fatalf("url %s", cap.url)
+	}
+	if cap.header.Get("Authorization") != "Bearer "+apiKey || cap.header.Get("x-goog-api-key") != "" {
+		t.Fatalf("header %#v", cap.header)
+	}
+	var req struct {
+		Store     bool `json:"store"`
+		Reasoning struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+		Input []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"input"`
+		Text struct {
+			Format struct {
+				Schema json.RawMessage `json:"schema"`
+			} `json:"format"`
+		} `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(cap.body), &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Store || req.Reasoning.Effort != "high" || !strings.Contains(cap.body, `"store":false`) {
+		t.Fatalf("store %v effort %q", req.Store, req.Reasoning.Effort)
+	}
+	if len(req.Input) != 2 || req.Input[0].Content != jobad.GeminiAnalysisInstructions || req.Input[1].Content != prompt {
+		t.Fatal("prompt mismatch")
+	}
+	if strings.Contains(req.Input[1].Content, "COMPANY-TOKEN") || !bytes.Contains(req.Text.Format.Schema, []byte(`"enum":["must","advantage"]`)) {
+		t.Fatalf("schema %s", req.Text.Format.Schema)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
 type geminiHTTPStep struct {
 	status int
 	body   string
@@ -4540,6 +5042,7 @@ func TestAnalyzeUsage(t *testing.T) {
 	}{
 		{name: "no flag", args: []string{"analyze"}},
 		{name: "gemini only", args: []string{"analyze", "--gemini"}},
+		{name: "grok only", args: []string{"analyze", "--grok"}},
 		{name: "missing value", args: []string{"analyze", "--json"}},
 		{name: "empty value", args: []string{"analyze", "--json", ""}},
 		{name: "unknown flag", args: []string{"analyze", "--bogus"}},
@@ -4571,10 +5074,10 @@ func TestAnalyzeUsage(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  gemini-key\n  analyze --json PATH [--gemini]\n  analyze --batch [--gemini]\n") {
+	if !strings.Contains(usageText, "\n  gemini-key\n  grok-key\n  analyze --json PATH [--gemini | --grok]\n  analyze --batch [--gemini | --grok]\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
 	}
-	if !strings.Contains(usageText, "\n  --batch          analyze every .json file in ./batch/jobads/parsed\n  --gemini         skip the on-device model and call Gemini\n") {
+	if !strings.Contains(usageText, "\n  --batch          analyze every .json file in ./batch/jobads/parsed\n  --gemini         skip the on-device model and call Gemini\n  --grok           skip the on-device model and call Grok\n") {
 		t.Fatalf("usage batch flag:\n%s", usageText)
 	}
 }
@@ -5028,6 +5531,10 @@ func TestAnalyzeBatch(t *testing.T) {
 			{"analyze", "--batch", "--json", "job.json", "--gemini"},
 			{"analyze", "--json", "job.json", "--batch", "--gemini"},
 			{"analyze", "--gemini"},
+			{"analyze", "--grok"},
+			{"analyze", "--json", "job.json", "--gemini", "--grok"},
+			{"analyze", "--batch", "--gemini", "--grok"},
+			{"analyze", "--grok", "--gemini"},
 			{"analyze", "--batch", "extra"},
 			{"analyze", "--batch", "--json", "job.json", "extra"},
 			{"analyze", "--batch=false"},
@@ -5042,6 +5549,7 @@ func TestAnalyzeBatch(t *testing.T) {
 			writeAt(t, filepath.Join(parsed, "a.json"), body)
 			stdout, stderr, code := runBatch(t, dir, args, deps{
 				GeminiClient: blockGemini(t),
+				GrokClient:   blockGemini(t),
 			})
 			if code != 2 || stdout != "" || !strings.Contains(stderr, "usage: docs-cli") {
 				t.Fatalf("args %v exit %d stdout %q stderr %q", args, code, stdout, stderr)
@@ -6455,7 +6963,7 @@ func TestDraftUsage(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(usageText, "\n  analyze --json PATH [--gemini]\n  analyze --batch [--gemini]\n  draft --json PATH --template PATH --cv PATH [--pdf NAME]\n") {
+	if !strings.Contains(usageText, "\n  analyze --json PATH [--gemini | --grok]\n  analyze --batch [--gemini | --grok]\n  draft --json PATH --template PATH --cv PATH [--pdf NAME]\n") {
 		t.Fatalf("usage commands:\n%s", usageText)
 	}
 	if !strings.Contains(usageText, "\n  --template PATH  cover-letter template PDF\n  --cv PATH        CV or resume PDF\n  --pdf NAME       PDF file name in drafts; omitted means a timestamped .txt file\n") {
@@ -6767,6 +7275,7 @@ func draftUsageCases() []struct {
 		{name: "json and template", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf"}},
 		{name: "unknown flag", args: []string{"draft", "--bogus"}},
 		{name: "gemini flag", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "--cv", "cv.pdf", "--gemini"}},
+		{name: "grok flag", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "--cv", "cv.pdf", "--grok"}},
 		{name: "out flag", args: []string{"draft", "--out", "letter.txt"}},
 		{name: "extra arg", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "--cv", "cv.pdf", "extra"}},
 		{name: "missing pdf", args: []string{"draft", "--json", "job.json", "--template", "letter.pdf", "--cv", "cv.pdf", "--pdf"}},
@@ -6923,6 +7432,26 @@ func countingGemini(t *testing.T, status int, response string, hits *int, cap *g
 		*hits++
 		return inner.Transport.RoundTrip(r)
 	})}
+}
+
+func grokEnvelope(t *testing.T, object string) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"status": "completed",
+		"output": []any{
+			map[string]any{"type": "reasoning", "encrypted_content": "REASONING-SECRET"},
+			map[string]any{
+				"type": "message",
+				"content": []any{
+					map[string]any{"type": "output_text", "text": object},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 func analysisEnvelope(t *testing.T, object string) string {
