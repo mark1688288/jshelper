@@ -8,6 +8,8 @@
 [![Google Gemini](https://img.shields.io/badge/Google%20Gemini-8E75B2?logo=googlegemini&logoColor=white)](https://ai.google.dev/gemini-api)
 [![Apple Intelligence](https://img.shields.io/badge/Apple%20Intelligence-000000?logo=apple&logoColor=white)](https://www.apple.com/apple-intelligence/)
 [![Foundation Models](https://img.shields.io/badge/Foundation%20Models-000000?logo=apple&logoColor=white)](https://developer.apple.com/documentation/foundationmodels)
+[![xAI](https://img.shields.io/badge/xAI-000000)](https://x.ai/)
+[![Grok](https://img.shields.io/badge/Grok-000000)](https://docs.x.ai/)
 
 `docs-cli` helps us draft cover letters in a systematic workflow. It helps us quickly understand job ads. An LLM assists with `parse`, `analyze`, and `draft`. `draft` references the provided CV and cover letter templates, and an LLM drafts a cover letter for the provided job ad. It can upload parsed and analysis JSON files and create Google Docs in Google Drive.
 
@@ -121,18 +123,26 @@ When `docs-cli` calls Gemini, the model id is `GEMINI_MODEL` from `.env`. A miss
 docs-cli gemini-key
 ```
 
-`grok-key` stores a Grok API key in the keyring item `docs-cli` / `grok-api-key`. The key is typed at the terminal and is not echoed. It is not a flag, not an environment variable, and it is not written to `.env` or `credentials.json`.
-
-```bash
-docs-cli grok-key
-```
-
 > [!IMPORTANT]
 > Please read the section「Unpaid Services」→「How Google Uses Your Data」[^1].
 > Use a Pay-as-you-go billing tier API key only.
 
 [^1]: Quoted from the [Gemini API Additional Terms of Service](https://ai.google.dev/gemini-api/terms).
 
+## xAI Grok
+
+When `docs-cli` calls Grok, the model id is `GROK_MODEL` from `.env`. A missing or empty value uses the built-in model id `grok-4.7`. The API key is not read from `.env`.
+
+`grok-key` stores a Grok API key in the keyring item `docs-cli` / `grok-api-key`. The key is typed at the terminal and is not echoed. It is not a flag, not an environment variable, and it is not written to `.env` or `credentials.json`.
+
+```bash
+docs-cli grok-key
+```
+
+![workflow](img/jshelper_grok-key.jpeg)
+
+> [!Note]
+> Create the API key in the xAI console. Enable only the Chat endpoint and the model you call, e.g.: `grok-4.7`.
 
 ## Apple Intelligence
 
@@ -283,6 +293,7 @@ security delete-generic-password -s docs-cli -a grok-api-key
 
 ## Demo
 ![workflow](img/demo.jpeg)
+![workflow](img/jshelper_grok-analyze.jpeg)
 
 
 ## License
