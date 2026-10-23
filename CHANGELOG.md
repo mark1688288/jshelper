@@ -2,6 +2,21 @@
 
 Notable changes to `docs-cli` are recorded here. The source for a release is its git tag. Install steps stay on the GitHub Release.
 
+## 1.2.0 - 2026-10-23
+
+### Added
+
+- `docs-cli grok-key` stores a Grok API key in the keyring item `docs-cli` / `grok-api-key`. The key is typed at the terminal and is not echoed. It is not written to `.env` or `credentials.json`.
+- `analyze --json` and `analyze --batch` accept `--grok`. That flag asks Grok for the analysis JSON, skips the on-device model and Gemini, and does not fall back.
+- A Grok request uses the same job description and extraction instructions as Gemini. Reasoning effort is high. The built-in model id is `grok-4.7`.
+- When analyze calls Grok, the model id is `GROK_MODEL` from `.env`. A missing or empty value uses `grok-4.7`. The API key is not read from `.env`.
+- `--gemini` and `--grok` together are rejected. `draft` does not accept `--grok`. Without `--grok`, analyze still tries the on-device model first.
+
+### Documentation
+
+- The README adds the xAI Grok section, text badges for xAI and Grok, and the grok-key and grok-analyze screenshots.
+- The supported release in the security policy is 1.2.0. The policy names the Grok API key with the other keyring secrets.
+
 ## 1.1.0 - 2026-10-15
 
 ### Changed
